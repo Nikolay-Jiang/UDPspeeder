@@ -33,23 +33,12 @@
 #include <stdarg.h>
 #include <assert.h>
 
-#if !defined(NO_LIBEV_EMBED)
 #include <my_ev.h>
-#else
-#include "ev.h"
-#endif
-
-#if defined(__MINGW32__)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-typedef int socklen_t;
-#else
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#endif
 
 #include <unordered_map>
 #include <unordered_set>
@@ -68,28 +57,14 @@ typedef int i32_t;
 typedef unsigned short u16_t;
 typedef short i16_t;
 
-#if defined(__MINGW32__)
-int inet_pton(int af, const char *src, void *dst);
-const char *inet_ntop(int af, const void *src, char *dst, socklen_t size);
-#define setsockopt(a, b, c, d, e) setsockopt(a, b, c, (const char *)(d), e)
-#endif
-
 char *get_sock_error();
 int get_sock_errno();
 int init_ws();
 
-#if defined(__MINGW32__)
-typedef SOCKET my_fd_t;
-inline int sock_close(my_fd_t fd) {
-    return closesocket(fd);
-}
-#else
 typedef int my_fd_t;
 inline int sock_close(my_fd_t fd) {
     return close(fd);
 }
-
-#endif
 
 struct my_itimerspec {
     struct timespec it_interval; /* Timer interval */
@@ -393,8 +368,6 @@ void init_random_number_fd();
 u64_t get_fake_random_number_64();
 u32_t get_fake_random_number();
 u32_t get_fake_random_number_nz();
-u64_t ntoh64(u64_t a);
-u64_t hton64(u64_t a);
 bool larger_than_u16(uint16_t a, uint16_t b);
 bool larger_than_u32(u32_t a, u32_t b);
 void setnonblocking(int sock);

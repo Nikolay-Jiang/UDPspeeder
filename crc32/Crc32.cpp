@@ -62,35 +62,11 @@
   #define __BYTE_ORDER __BIG_ENDIAN
 #endif
 
-// define endianess and some integer data types
-#if defined(_MSC_VER) || defined(__MINGW32__)
-/*
-  // Windows always little endian
-  #define __BYTE_ORDER __LITTLE_ENDIAN
-*/
-  // intrinsics / prefetching
-  #if defined(__MINGW32__) || defined(__clang__)
-    #define PREFETCH(location) __builtin_prefetch(location)
-  #else
-    #if defined(__SSE2__)
-      #include <xmmintrin.h>
-      #define PREFETCH(location) _mm_prefetch(location, _MM_HINT_T0)
-    #else
-      #define PREFETCH(location) ;
-    #endif
-  #endif
+// intrinsics / prefetching
+#ifdef __GNUC__
+  #define PREFETCH(location) __builtin_prefetch(location)
 #else
-/*
-  // defines __BYTE_ORDER as __LITTLE_ENDIAN or __BIG_ENDIAN
-  #include <sys/param.h>
-*/
-  // intrinsics / prefetching
-  #ifdef __GNUC__
-    #define PREFETCH(location) __builtin_prefetch(location)
-  #else
-    // no prefetching
-    #define PREFETCH(location) ;
-  #endif
+  #define PREFETCH(location) ;
 #endif
 
 // abort if byte order is undefined

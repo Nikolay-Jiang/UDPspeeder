@@ -98,13 +98,9 @@ int main(int argc, char *argv[]) {
     // unit_test();
 
     struct ev_loop *loop = ev_default_loop(0);
-#if !defined(__MINGW32__)
     ev_signal signal_watcher_sigpipe;
     ev_signal_init(&signal_watcher_sigpipe, sigpipe_cb, SIGPIPE);
     ev_signal_start(loop, &signal_watcher_sigpipe);
-#else
-    enable_log_color = 0;
-#endif
 
     ev_signal signal_watcher_sigterm;
     ev_signal_init(&signal_watcher_sigterm, sigterm_cb, SIGTERM);

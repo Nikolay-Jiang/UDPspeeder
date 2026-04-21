@@ -27,9 +27,7 @@ tested on a link with 100ms latency and 10% packet loss at both direction
 ![](/images/en/scp_compare2.PNG)
 
 # Supported Platforms
-Linux host (including desktop Linux,Android phone/tablet, OpenWRT router, or Raspberry PI).
-
-For Windows and MacOS You can run UDPspeeder inside [this](https://github.com/wangyu-/udp2raw-tunnel/releases/download/20171108.0/lede-17.01.2-x86_virtual_machine_image.zip) 7.5mb virtual machine image.
+Linux only: desktop Linux, Android (Termux), OpenWRT router, Raspberry Pi.
 
 # How does it work
 
@@ -55,6 +53,26 @@ Check wikipedia for more info, https://en.wikipedia.org/wiki/Reed–Solomon_erro
 
 ### Installing
 Download binary release from https://github.com/wangyu-/UDPspeeder/releases
+
+### Building from Source
+
+Requires g++ with C++11 support.
+
+```bash
+make          # native Linux build, produces ./speederv2
+make debug    # debug build with MY_DEBUG defined, no -O2
+make fast     # optimized build with debug symbols
+```
+
+Cross-compile targets for OpenWRT/embedded (toolchain paths must be set in `makefile`):
+
+```bash
+make amd64
+make arm
+make x86
+make mips24kc_be
+make mips24kc_le
+```
 
 ### Running (improves UDP traffic only)
 Assume your server ip is 44.55.66.77, you have a service listening on udp port 7777.

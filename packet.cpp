@@ -47,33 +47,6 @@ void decrypt_0(char *input, int &len, char *key) {
         input[i] ^= key[j];
     }
 }
-int do_obscure_old(const char *input, int in_len, char *output, int &out_len) {
-    // memcpy(output,input,in_len);
-    //	out_len=in_len;
-    // return 0;
-
-    int i, j, k;
-    if (in_len > 65535 || in_len < 0)
-        return -1;
-    int iv_len = iv_min + rand() % (iv_max - iv_min);
-    get_fake_random_chars(output, iv_len);
-    memcpy(output + iv_len, input, in_len);
-
-    output[iv_len + in_len] = (uint8_t)iv_len;
-
-    output[iv_len + in_len] ^= output[0];
-    output[iv_len + in_len] ^= key_string[0];
-
-    for (i = 0, j = 0, k = 1; i < in_len; i++, j++, k++) {
-        if (j == iv_len) j = 0;
-        if (key_string[k] == 0) k = 0;
-        output[iv_len + i] ^= output[j];
-        output[iv_len + i] ^= key_string[k];
-    }
-
-    out_len = iv_len + in_len + 1;
-    return 0;
-}
 
 int do_obscure(char *data, int &len) {
     assert(len >= 0);
@@ -103,30 +76,6 @@ int de_obscure(char *data, int &len) {
         data[i] ^= data[len + j];
     }
 
-    return 0;
-}
-int de_obscure_old(const char *input, int in_len, char *output, int &out_len) {
-    // memcpy(output,input,in_len);
-    // out_len=in_len;
-    // return 0;
-
-    int i, j, k;
-    if (in_len > 65535 || in_len < 0) {
-        mylog(log_debug, "in_len > 65535||in_len<0 ,  %d", in_len);
-        return -1;
-    }
-    int iv_len = int((uint8_t)(input[in_len - 1] ^ input[0] ^ key_string[0]));
-    out_len = in_len - 1 - iv_len;
-    if (out_len < 0) {
-        mylog(log_debug, "%d %d\n", in_len, out_len);
-        return -1;
-    }
-    for (i = 0, j = 0, k = 1; i < in_len; i++, j++, k++) {
-        if (j == iv_len) j = 0;
-        if (key_string[k] == 0) k = 0;
-        output[i] = input[iv_len + i] ^ input[j] ^ key_string[k];
-    }
-    dup_packet_recv_count++;
     return 0;
 }
 

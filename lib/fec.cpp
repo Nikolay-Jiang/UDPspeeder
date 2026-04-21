@@ -50,15 +50,6 @@ typedef unsigned long u_long;
 /*
  * compatibility stuff
  */
-#if defined(MSDOS)||defined(__MINGW32__)	/* but also for others, e.g. sun... */
-#define NEED_BCOPY
-#define bcmp(a,b,n) memcmp(a,b,n)
-#endif
-
-#ifdef NEED_BCOPY
-#define bcopy(s, d, siz)        memcpy((d), (s), (siz))
-#define bzero(d, siz)   memset((d), '\0', (siz))
-#endif
 
 /*
  * stuff used for testing purposes only
@@ -68,20 +59,9 @@ typedef unsigned long u_long;
 #define DEB(x)
 #define DDB(x) x
 #define	DEBUG	0	/* minimal debugging */
-#ifdef	MSDOS
-#include <time.h>
-struct timeval {
-    unsigned long ticks;
-};
-#define gettimeofday(x, dummy) { (x)->ticks = clock() ; }
-#define DIFF_T(a,b) (1+ 1000000*(a.ticks - b.ticks) / CLOCKS_PER_SEC )
-typedef unsigned long u_long ;
-typedef unsigned short u_short ;
-#else /* typically, unix systems */
 #include <sys/time.h>
 #define DIFF_T(a,b) \
 	(1+ 1000000*(a.tv_sec - b.tv_sec) + (a.tv_usec - b.tv_usec) )
-#endif
 
 #define TICK(t) \
 	{struct timeval x ; \
