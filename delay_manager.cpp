@@ -59,9 +59,12 @@ int delay_manager_t::add(my_time_t delay, const dest_t &dest, char *data, int le
     }
 
     delay_data_t tmp = delay_data;
-    tmp.data = (char *)malloc(delay_data.len + 100);
+    if (pool.is_full())
+        mylog(log_warn, "packet pool exhausted, falling back to malloc\n");
+    tmp.pooled = !pool.is_full();
+    tmp.data = pool.acquire();
     if (!tmp.data) {
-        mylog(log_warn, "malloc() returned null in delay_manager_t::add()");
+        mylog(log_warn, "OOM in delay_manager_t::add()\n");
         return -1;
     }
     memcpy(tmp.data, data, delay_data.len);
@@ -92,7 +95,7 @@ int delay_manager_t::check() {
                 if (ret != 0) {
                     mylog(log_trace, "handle() return %d\n", ret);
                 }
-                free(it->second.data);
+                pool.release(it->second.data, it->second.pooled);
                 delay_mp.erase(it);
             } else {
                 break;
