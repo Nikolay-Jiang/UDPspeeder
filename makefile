@@ -67,6 +67,9 @@ release: ${TARGETS}
 	cp git_version.h version.txt
 	tar -zcvf ${TAR}
 
+test: all
+	bash tests/smoke.sh ./${NAME}
+
 clean:
 	rm -f ${TAR}
 	rm -f ${NAME} ${NAME}_cross
