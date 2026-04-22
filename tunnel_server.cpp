@@ -126,132 +126,138 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
     int ret;
 
     mylog(log_trace, "events[idx].data.u64 == (u64_t)local_listen_fd\n");
-    char data[buf_len];
-    int data_len;
-    address_t::storage_t udp_new_addr_in = {0};
-    socklen_t udp_new_addr_len = sizeof(address_t::storage_t);
-    if ((data_len = recvfrom(local_listen_fd, data, max_data_len + 1, 0,
-                             (struct sockaddr *)&udp_new_addr_in, &udp_new_addr_len)) == -1) {
-        mylog(log_error, "recv_from error,this shouldnt happen,err=%s,but we can try to continue\n", get_sock_error());
-        return;
-    };
 
-    if (data_len == max_data_len + 1) {
-        mylog(log_warn, "huge packet, data_len > %d, packet truncated, dropped\n", max_data_len);
-        return;
-    }
-
-    address_t addr;
-    addr.from_sockaddr((struct sockaddr *)&udp_new_addr_in, udp_new_addr_len);
-
-    mylog(log_trace, "Received packet from %s,len: %d\n", addr.get_str(), data_len);
-
-    if (!disable_mtu_warn && data_len >= mtu_warn)  ///////////////////////delete this for type 0 in furture
-    {
-        mylog(log_warn, "huge packet,data len=%d (>=%d).strongly suggested to set a smaller mtu at upper level,to get rid of this warn\n ", data_len, mtu_warn);
-    }
-
-    if (de_cook(data, data_len) != 0) {
-        mylog(log_debug, "de_cook error");
-        return;
-    }
-
-    if (!conn_manager.exist(addr)) {
-        if (conn_manager.mp.size() >= max_conn_num) {
-            mylog(log_warn, "new connection %s ignored bc max_conn_num exceed\n", addr.get_str());
-            return;
+    static char batch_bufs[IO_BATCH_MAX][buf_len];
+    static struct iovec batch_iov[IO_BATCH_MAX];
+    static struct mmsghdr batch_msgs[IO_BATCH_MAX];
+    static address_t::storage_t batch_addrs[IO_BATCH_MAX];
+    static bool init = false;
+    if (!init) {
+        for (int i = 0; i < IO_BATCH_MAX; i++) {
+            batch_iov[i].iov_base = batch_bufs[i];
+            batch_iov[i].iov_len = max_data_len + 1;
+            memset(&batch_msgs[i], 0, sizeof(batch_msgs[i]));
+            batch_msgs[i].msg_hdr.msg_iov = &batch_iov[i];
+            batch_msgs[i].msg_hdr.msg_iovlen = 1;
+            batch_msgs[i].msg_hdr.msg_name = &batch_addrs[i];
+            batch_msgs[i].msg_hdr.msg_namelen = sizeof(address_t::storage_t);
         }
-
-        // conn_manager.insert(addr);
-        conn_info_t &conn_info = conn_manager.find_insert(addr);
-        conn_info.addr = addr;
-        conn_info.loop = ev_default_loop(0);
-        conn_info.local_listen_fd = local_listen_fd;
-
-        // u64_t fec_fd64=conn_info.fec_encode_manager.get_timer_fd64();
-        // mylog(log_debug,"fec_fd64=%llu\n",fec_fd64);
-        // ev.events = EPOLLIN;
-        // ev.data.u64 = fec_fd64;
-        // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd_manager.to_fd(fec_fd64), &ev);
-
-        // fd_manager.get_info(fec_fd64).ip_port=ip_port;
-
-        conn_info.timer.data = &conn_info;
-        ev_init(&conn_info.timer, conn_timer_cb);
-        ev_timer_set(&conn_info.timer, 0, timer_interval / 1000.0);
-        ev_timer_start(loop, &conn_info.timer);
-
-        // conn_info.timer.add_fd64_to_epoll(epoll_fd);
-        // conn_info.timer.set_timer_repeat_us(timer_interval*1000);
-
-        // mylog(log_debug,"conn_info.timer.get_timer_fd64()=%llu\n",conn_info.timer.get_timer_fd64());
-
-        // u64_t timer_fd64=conn_info.timer.get_timer_fd64();
-        // fd_manager.get_info(timer_fd64).ip_port=ip_port;
-
-        conn_info.fec_encode_manager.set_data(&conn_info);
-        conn_info.fec_encode_manager.set_loop_and_cb(loop, fec_encode_cb);
-
-        mylog(log_info, "new connection from %s\n", addr.get_str());
+        init = true;
     }
-    conn_info_t &conn_info = conn_manager.find_insert(addr);
 
-    conn_info.update_active_time();
-    int out_n;
-    char **out_arr;
-    int *out_len;
-    my_time_t *out_delay;
-    from_fec_to_normal(conn_info, data, data_len, out_n, out_arr, out_len, out_delay);
+    for (int i = 0; i < io_batch_size; i++)
+        batch_msgs[i].msg_hdr.msg_namelen = sizeof(address_t::storage_t);
 
-    mylog(log_trace, "out_n= %d\n", out_n);
-    for (int i = 0; i < out_n; i++) {
-        u32_t conv;
-        char *new_data;
-        int new_len;
-        if (get_conv(conv, out_arr[i], out_len[i], new_data, new_len) != 0) {
-            mylog(log_debug, "get_conv failed");
+    int nrecv = recvmmsg(local_listen_fd, batch_msgs, io_batch_size, MSG_DONTWAIT, NULL);
+    if (nrecv <= 0) {
+        mylog(log_error, "recvmmsg error,err=%s,but we can try to continue\n", get_sock_error());
+        return;
+    }
+
+    my_send_batch_begin();
+    for (int p = 0; p < nrecv; p++) {
+        int data_len = (int)batch_msgs[p].msg_len;
+        char *data = batch_bufs[p];
+
+        if (data_len == max_data_len + 1) {
+            mylog(log_warn, "huge packet, data_len > %d, packet truncated, dropped\n", max_data_len);
             continue;
         }
 
-        if (!conn_info.conv_manager.s.is_conv_used(conv)) {
-            if (conn_info.conv_manager.s.get_size() >= max_conv_num) {
-                mylog(log_warn, "ignored new udp connect bc max_conv_num exceed\n");
-                continue;
-            }
+        address_t addr;
+        addr.from_sockaddr((struct sockaddr *)&batch_addrs[p], batch_msgs[p].msg_hdr.msg_namelen);
 
-            int new_udp_fd;
-            ret = new_connected_socket2(new_udp_fd, remote_addr, out_addr, out_interface);
+        mylog(log_trace, "Received packet from %s,len: %d\n", addr.get_str(), data_len);
 
-            if (ret != 0) {
-                mylog(log_warn, "[%s]new_connected_socket failed\n", addr.get_str());
-                continue;
-            }
-
-            fd64_t fd64 = fd_manager.create(new_udp_fd);
-            // ev.events = EPOLLIN;
-            // ev.data.u64 = fd64;
-            // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_udp_fd, &ev);
-
-            conn_info.conv_manager.s.insert_conv(conv, fd64);
-            fd_manager.get_info(fd64).addr = addr;
-
-            ev_io &io_watcher = fd_manager.get_info(fd64).io_watcher;
-            io_watcher.u64 = fd64;
-            io_watcher.data = &conn_info;
-
-            ev_init(&io_watcher, remote_cb);
-            ev_io_set(&io_watcher, new_udp_fd, EV_READ);
-            ev_io_start(conn_info.loop, &io_watcher);
-
-            mylog(log_info, "[%s]new conv %x,fd %d created,fd64=%llu\n", addr.get_str(), conv, new_udp_fd, fd64);
+        if (!disable_mtu_warn && data_len >= mtu_warn)  ///////////////////////delete this for type 0 in furture
+        {
+            mylog(log_warn, "huge packet,data len=%d (>=%d).strongly suggested to set a smaller mtu at upper level,to get rid of this warn\n ", data_len, mtu_warn);
         }
-        conn_info.conv_manager.s.update_active_time(conv);
-        fd64_t fd64 = conn_info.conv_manager.s.find_data_by_conv(conv);
-        dest_t dest;
-        dest.type = type_fd64;
-        dest.inner.fd64 = fd64;
-        delay_send(out_delay[i], dest, new_data, new_len);
+
+        if (de_cook(data, data_len) != 0) {
+            mylog(log_debug, "de_cook error");
+            continue;
+        }
+
+        if (!conn_manager.exist(addr)) {
+            if (conn_manager.mp.size() >= max_conn_num) {
+                mylog(log_warn, "new connection %s ignored bc max_conn_num exceed\n", addr.get_str());
+                continue;
+            }
+
+            conn_info_t &new_conn_info = conn_manager.find_insert(addr);
+            new_conn_info.addr = addr;
+            new_conn_info.loop = ev_default_loop(0);
+            new_conn_info.local_listen_fd = local_listen_fd;
+
+            new_conn_info.timer.data = &new_conn_info;
+            ev_init(&new_conn_info.timer, conn_timer_cb);
+            ev_timer_set(&new_conn_info.timer, 0, timer_interval / 1000.0);
+            ev_timer_start(loop, &new_conn_info.timer);
+
+            new_conn_info.fec_encode_manager.set_data(&new_conn_info);
+            new_conn_info.fec_encode_manager.set_loop_and_cb(loop, fec_encode_cb);
+
+            mylog(log_info, "new connection from %s\n", addr.get_str());
+        }
+
+        conn_info_t &conn_info = conn_manager.find_insert(addr);
+        conn_info.update_active_time();
+
+        int out_n;
+        char **out_arr;
+        int *out_len;
+        my_time_t *out_delay;
+        from_fec_to_normal(conn_info, data, data_len, out_n, out_arr, out_len, out_delay);
+
+        mylog(log_trace, "out_n= %d\n", out_n);
+        for (int i = 0; i < out_n; i++) {
+            u32_t conv;
+            char *new_data;
+            int new_len;
+            if (get_conv(conv, out_arr[i], out_len[i], new_data, new_len) != 0) {
+                mylog(log_debug, "get_conv failed");
+                continue;
+            }
+
+            if (!conn_info.conv_manager.s.is_conv_used(conv)) {
+                if (conn_info.conv_manager.s.get_size() >= max_conv_num) {
+                    mylog(log_warn, "ignored new udp connect bc max_conv_num exceed\n");
+                    continue;
+                }
+
+                int new_udp_fd;
+                ret = new_connected_socket2(new_udp_fd, remote_addr, out_addr, out_interface);
+
+                if (ret != 0) {
+                    mylog(log_warn, "[%s]new_connected_socket failed\n", addr.get_str());
+                    continue;
+                }
+
+                fd64_t fd64 = fd_manager.create(new_udp_fd);
+
+                conn_info.conv_manager.s.insert_conv(conv, fd64);
+                fd_manager.get_info(fd64).addr = addr;
+
+                ev_io &io_watcher = fd_manager.get_info(fd64).io_watcher;
+                io_watcher.u64 = fd64;
+                io_watcher.data = &conn_info;
+
+                ev_init(&io_watcher, remote_cb);
+                ev_io_set(&io_watcher, new_udp_fd, EV_READ);
+                ev_io_start(conn_info.loop, &io_watcher);
+
+                mylog(log_info, "[%s]new conv %x,fd %d created,fd64=%llu\n", addr.get_str(), conv, new_udp_fd, fd64);
+            }
+            conn_info.conv_manager.s.update_active_time(conv);
+            fd64_t fd64 = conn_info.conv_manager.s.find_data_by_conv(conv);
+            dest_t dest;
+            dest.type = type_fd64;
+            dest.inner.fd64 = fd64;
+            delay_send(out_delay[i], dest, new_data, new_len);
+        }
     }
+    my_send_flush();
 }
 
 static void remote_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {

@@ -39,6 +39,7 @@ fd_manager_t fd_manager;
 int time_mono_test = 0;
 
 int delay_capacity = 0;
+int io_batch_size = 32;
 
 char sub_net[100] = "10.22.22.0";
 u32_t sub_net_uint32 = 0;
@@ -582,6 +583,7 @@ void process_arg(int argc, char *argv[]) {
             {"persist-tun", no_argument, 0, 1},
             {"manual-set-tun", no_argument, 0, 1},
             {"interval", required_argument, 0, 'i'},
+            {"io-batch", required_argument, 0, 1},
             {NULL, 0, 0, 0}};
     int option_index = 0;
     assert(g_fec_par.rs_from_str(rs_par_str) == 0);
@@ -744,6 +746,13 @@ void process_arg(int argc, char *argv[]) {
                         myexit(-1);
                     }
                     mylog(log_info, "random_drop=%d\n", random_drop);
+                } else if (strcmp(long_options[option_index].name, "io-batch") == 0) {
+                    sscanf(optarg, "%d", &io_batch_size);
+                    if (io_batch_size < 1 || io_batch_size > IO_BATCH_MAX) {
+                        mylog(log_fatal, "io-batch must be between 1 and %d\n", IO_BATCH_MAX);
+                        myexit(-1);
+                    }
+                    mylog(log_info, "io_batch_size=%d\n", io_batch_size);
                 } else if (strcmp(long_options[option_index].name, "delay-capacity") == 0) {
                     sscanf(optarg, "%d", &delay_capacity);
 

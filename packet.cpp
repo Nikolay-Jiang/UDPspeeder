@@ -28,6 +28,51 @@ int random_drop = 0;
 
 char key_string[1000] = "";
 
+struct send_batch_entry_t {
+    char buf[buf_len];
+    int len;
+    int fd;
+    address_t addr;
+};
+
+static send_batch_entry_t s_send_batch[IO_BATCH_MAX];
+static int s_send_n = 0;
+static bool s_batching = false;
+
+void my_send_batch_begin() {
+    s_send_n = 0;
+    s_batching = true;
+}
+
+void my_send_flush() {
+    static struct mmsghdr msgvec[IO_BATCH_MAX];
+    static struct iovec iov[IO_BATCH_MAX];
+
+    int i = 0;
+    while (i < s_send_n) {
+        int fd = s_send_batch[i].fd;
+        int count = 0;
+        int j = i;
+        while (j < s_send_n && s_send_batch[j].fd == fd) {
+            iov[count].iov_base = s_send_batch[j].buf;
+            iov[count].iov_len = s_send_batch[j].len;
+            memset(&msgvec[count], 0, sizeof(msgvec[count]));
+            msgvec[count].msg_hdr.msg_iov = &iov[count];
+            msgvec[count].msg_hdr.msg_iovlen = 1;
+            msgvec[count].msg_hdr.msg_name = (void *)&s_send_batch[j].addr.inner;
+            msgvec[count].msg_hdr.msg_namelen = s_send_batch[j].addr.get_len();
+            count++;
+            j++;
+        }
+        sendmmsg(fd, msgvec, count, 0);
+        i = j;
+    }
+
+    s_send_n = 0;
+    s_batching = false;
+}
+
+
 // int local_listen_fd=-1;
 
 void encrypt_0(char *input, int &len, char *key) {
@@ -115,6 +160,34 @@ int send_fd(int fd, char *buf, int len, int flags) {
 int my_send(const dest_t &dest, char *data, int len) {
     if (dest.cook) {
         do_cook(data, len);
+    }
+    if (s_batching && s_send_n < IO_BATCH_MAX) {
+        int fd = -1;
+        address_t addr;
+        bool batchable = false;
+        switch (dest.type) {
+            case type_fd_addr:
+                fd = dest.inner.fd_addr.fd;
+                addr = dest.inner.fd_addr.addr;
+                batchable = true;
+                break;
+            case type_fd64_addr:
+                if (!fd_manager.exist(dest.inner.fd64)) return -1;
+                fd = fd_manager.to_fd(dest.inner.fd64);
+                addr = dest.inner.fd64_addr.addr;
+                batchable = true;
+                break;
+            default:
+                break;
+        }
+        if (batchable) {
+            send_batch_entry_t &e = s_send_batch[s_send_n++];
+            memcpy(e.buf, data, len);
+            e.len = len;
+            e.fd = fd;
+            e.addr = addr;
+            return 0;
+        }
     }
     switch (dest.type) {
         case type_fd_addr: {

@@ -103,7 +103,6 @@ static void remote_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) 
 
     conn_info_t &conn_info = *((conn_info_t *)watcher->data);
 
-    char data[buf_len];
     if (!fd_manager.exist(watcher->u64))  // fd64 has been closed
     {
         mylog(log_trace, "!fd_manager.exist(events[idx].data.u64)");
@@ -116,62 +115,84 @@ static void remote_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) 
 
     int fd = fd_manager.to_fd(remote_fd64);
 
-    int data_len = recv(fd, data, max_data_len + 1, 0);
-
-    if (data_len == max_data_len + 1) {
-        mylog(log_warn, "huge packet, data_len > %d, packet truncated, dropped\n", max_data_len);
-        return;
-    }
-
-    mylog(log_trace, "received data from udp fd %d, len=%d\n", remote_fd, data_len);
-    if (data_len < 0) {
-        if (get_sock_errno() == ECONNREFUSED) {
-            mylog(log_debug, "recv failed %d ,udp_fd%d,errno:%s\n", data_len, remote_fd, get_sock_error());
+    static char batch_bufs[IO_BATCH_MAX][buf_len];
+    static struct iovec batch_iov[IO_BATCH_MAX];
+    static struct mmsghdr batch_msgs[IO_BATCH_MAX];
+    static bool init = false;
+    if (!init) {
+        for (int i = 0; i < IO_BATCH_MAX; i++) {
+            batch_iov[i].iov_base = batch_bufs[i];
+            batch_iov[i].iov_len = max_data_len + 1;
+            memset(&batch_msgs[i], 0, sizeof(batch_msgs[i]));
+            batch_msgs[i].msg_hdr.msg_iov = &batch_iov[i];
+            batch_msgs[i].msg_hdr.msg_iovlen = 1;
         }
+        init = true;
+    }
 
-        mylog(log_warn, "recv failed %d ,udp_fd%d,errno:%s\n", data_len, remote_fd, get_sock_error());
+    int nrecv = recvmmsg(fd, batch_msgs, io_batch_size, MSG_DONTWAIT, NULL);
+    if (nrecv <= 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            if (get_sock_errno() == ECONNREFUSED) {
+                mylog(log_debug, "recvmmsg ECONNREFUSED fd%d\n", remote_fd);
+            } else {
+                mylog(log_warn, "recvmmsg failed fd%d errno:%s\n", remote_fd, get_sock_error());
+            }
+        }
         return;
     }
-    if (!disable_mtu_warn && data_len > mtu_warn) {
-        mylog(log_warn, "huge packet,data len=%d (>%d).strongly suggested to set a smaller mtu at upper level,to get rid of this warn\n ", data_len, mtu_warn);
-    }
 
-    if (de_cook(data, data_len) != 0) {
-        mylog(log_debug, "de_cook error");
-        return;
-    }
+    my_send_batch_begin();
+    for (int p = 0; p < nrecv; p++) {
+        int data_len = (int)batch_msgs[p].msg_len;
+        char *data = batch_bufs[p];
 
-    int out_n;
-    char **out_arr;
-    int *out_len;
-    my_time_t *out_delay;
-    from_fec_to_normal(conn_info, data, data_len, out_n, out_arr, out_len, out_delay);
-
-    mylog(log_trace, "out_n=%d\n", out_n);
-
-    for (int i = 0; i < out_n; i++) {
-        u32_t conv;
-        char *new_data;
-        int new_len;
-        if (get_conv(conv, out_arr[i], out_len[i], new_data, new_len) != 0) {
-            mylog(log_debug, "get_conv(conv,out_arr[i],out_len[i],new_data,new_len)!=0");
+        if (data_len == max_data_len + 1) {
+            mylog(log_warn, "huge packet, data_len > %d, packet truncated, dropped\n", max_data_len);
             continue;
         }
-        if (!conn_info.conv_manager.c.is_conv_used(conv)) {
-            mylog(log_trace, "!conn_info.conv_manager.is_conv_used(conv)");
+        mylog(log_trace, "received data from udp fd %d, len=%d\n", remote_fd, data_len);
+        if (!disable_mtu_warn && data_len > mtu_warn) {
+            mylog(log_warn, "huge packet,data len=%d (>%d).strongly suggested to set a smaller mtu at upper level,to get rid of this warn\n ", data_len, mtu_warn);
+        }
+        if (de_cook(data, data_len) != 0) {
+            mylog(log_debug, "de_cook error");
             continue;
         }
 
-        conn_info.conv_manager.c.update_active_time(conv);
+        int out_n;
+        char **out_arr;
+        int *out_len;
+        my_time_t *out_delay;
+        from_fec_to_normal(conn_info, data, data_len, out_n, out_arr, out_len, out_delay);
 
-        address_t addr = conn_info.conv_manager.c.find_data_by_conv(conv);
-        dest_t dest;
-        dest.inner.fd_addr.fd = conn_info.local_listen_fd;
-        dest.inner.fd_addr.addr = addr;
-        dest.type = type_fd_addr;
+        mylog(log_trace, "out_n=%d\n", out_n);
 
-        delay_send(out_delay[i], dest, new_data, new_len);
+        for (int i = 0; i < out_n; i++) {
+            u32_t conv;
+            char *new_data;
+            int new_len;
+            if (get_conv(conv, out_arr[i], out_len[i], new_data, new_len) != 0) {
+                mylog(log_debug, "get_conv(conv,out_arr[i],out_len[i],new_data,new_len)!=0");
+                continue;
+            }
+            if (!conn_info.conv_manager.c.is_conv_used(conv)) {
+                mylog(log_trace, "!conn_info.conv_manager.is_conv_used(conv)");
+                continue;
+            }
+
+            conn_info.conv_manager.c.update_active_time(conv);
+
+            address_t addr = conn_info.conv_manager.c.find_data_by_conv(conv);
+            dest_t dest;
+            dest.inner.fd_addr.fd = conn_info.local_listen_fd;
+            dest.inner.fd_addr.addr = addr;
+            dest.type = type_fd_addr;
+
+            delay_send(out_delay[i], dest, new_data, new_len);
+        }
     }
+    my_send_flush();
 }
 
 static void fifo_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
