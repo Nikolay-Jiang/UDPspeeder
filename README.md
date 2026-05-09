@@ -27,7 +27,7 @@ tested on a link with 100ms latency and 10% packet loss at both direction
 ![](/images/en/scp_compare2.PNG)
 
 # Supported Platforms
-Linux only: desktop Linux, Android (Termux), OpenWRT router, Raspberry Pi.
+Linux x86 / x86_64 only.
 
 # How does it work
 
@@ -64,14 +64,11 @@ make debug    # debug build with MY_DEBUG defined, no -O2
 make fast     # optimized build with debug symbols
 ```
 
-Cross-compile targets for OpenWRT/embedded (toolchain paths must be set in `makefile`):
+Static cross-compile targets using the bundled OpenWRT x86 musl toolchains (toolchain paths must be set in `makefile`):
 
 ```bash
 make amd64
-make arm
 make x86
-make mips24kc_be
-make mips24kc_le
 ```
 
 ### Running (improves UDP traffic only)
@@ -143,6 +140,7 @@ developer options:
     --delay-capacity      <number>        max number of delayed packets
     --disable-fec         <number>        completely disable fec, turn the program into a normal udp tunnel
     --sock-buf            <number>        buf size for socket, >=10 and <=10240, unit: kbyte, default: 1024
+    --io-batch            <number>        batch size for recvmmsg/sendmmsg, 1..64, default: 32. set to 1 to disable batching.
 log and help options:
     --log-level           <number>        0: never    1: fatal   2: error   3: warn 
                                           4: info (default)      5: debug   6: trace
@@ -161,6 +159,17 @@ echo queue-len 100 > fifo.file
 echo mode 0 > fifo.file
 ```
 
+
+# Recent Changes (branch_libev)
+
+Recent performance and maintenance work on `branch_libev`:
+
+- **Linux x86/x86_64 only.** Windows, macOS, ARM and MIPS build paths were removed; the tree now targets Linux x86 / x86_64 only, simplifying the source and the makefile.
+- **Zero-malloc hot path in `delay_manager`.** Per-packet `malloc`/`free` on the outbound delay/jitter path was replaced with a pre-allocated object pool (`packet_pool_t`, LIFO free list, ~800 slots). Falls back to `malloc` with a warning only if the pool is exhausted.
+- **Batch I/O via `recvmmsg` / `sendmmsg`.** Both the client remote callback and the server local-listen callback now drain up to `--io-batch` packets per libev wakeup with a single `recvmmsg` syscall. Outbound packets produced while decoding a batch are coalesced and flushed with `sendmmsg`, grouped by fd. At 32-packet batches this cuts receive/send syscall counts by roughly 32×, materially lowering CPU at high pps. New `--io-batch N` CLI option (1..64, default 32; set to 1 to disable).
+- **CI + loopback smoke test.** A GitHub Actions workflow (`.github/workflows/ci.yml`) now builds on `ubuntu-latest` and runs `tests/smoke.sh`, which spins up a server, client, and a small Python UDP echo, and verifies FEC recovery under both lossless and `--random-drop 1500` (15% loss) conditions using `-f20:10`.
+
+All of the above is on `branch_libev`; no CLI compatibility was broken (every new flag is additive with sensible defaults).
 
 # wiki
 Check wiki for more info:
