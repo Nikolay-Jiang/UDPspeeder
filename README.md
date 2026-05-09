@@ -97,6 +97,67 @@ See [UDPspeeder + openvpn config guide](https://github.com/wangyu-/UDPspeeder/wi
 
 # Advanced Topic
 
+### Port-Range Mode (Defeat Per-Flow ISP Rate Limiting)
+
+**Note:** This feature is optional and disabled by default.
+
+#### Motivation
+
+Some ISPs implement per-5-tuple flow-level rate limiting or QoS: a single UDP 5-tuple (source IP, source port, dest IP, dest port, protocol) is throttled to a lower bandwidth. UDPspeeder's default mode uses a single UDP socket, concentrating all tunnel traffic onto one 5-tuple—allowing the ISP to apply the per-flow limit to the entire tunnel.
+
+**Port-range mode** spreads tunnel traffic across N different UDP ports on the server and client, creating N distinct 5-tuples. ISP per-flow limits are now applied per-port, so the total tunnel capacity is multiplied by N.
+
+#### How It Works
+
+- **Server:** Binds to a fixed **control port** + a range of **data ports** (up to 256).
+- **Client:** Establishes a handshake on the control port, learns the list of available data ports, then round-robin distributes all outbound packets across the N data ports.
+- **NAT traversal:** The server tracks the NAT endpoint (source port + which data fd received the packet) for each client and uses those to reverse-route packets back through the correct data fd—compatible with symmetric NAT.
+
+Data packets still use the same on-wire format (obscure, XOR, FEC, etc.); only the socket routing changes. Session management is kept lightweight: a separate control-plane protocol carries the handshake and keepalive, while data packets flow over data ports unchanged.
+
+#### Example
+
+Enable port-range mode with 16 data ports:
+
+```bash
+# Server: listen on control port 14096 and data ports 15000–15015
+./speederv2 -s \
+    --port-range-mode \
+    --control-port 14096 \
+    --data-port-range 15000-15015 \
+    -r 127.0.0.1:7777 \
+    -f20:10 -k "passwd"
+
+# Client: dial control port 14096, get data port list, tunnel via those ports
+./speederv2 -c \
+    --port-range-mode \
+    --control-host 44.55.66.77:14096 \
+    -l 0.0.0.0:3333 \
+    -f20:10 -k "passwd"
+```
+
+Client and server **must both specify `--port-range-mode`**; there is no automatic fallback. If only one side enables it, the handshake will fail.
+
+#### Verification
+
+To verify that traffic is spreading across ports, capture a sample on loopback:
+
+```bash
+sudo tcpdump -i lo udp port range 15000-15015 -c 100 | awk '{print $NF}' | sort | uniq -c
+```
+
+You should see packets distributed across multiple destination ports in the range.
+
+#### Control-Plane Protocol
+
+The control plane uses an independent packet structure (version, msg_type, nonce, timestamp, payload, MAC). 
+
+- **MAC algorithms:** `legacy` (default; uses existing `do_obscure` + `encrypt_0`) or `siphash` (SipHash-2-4 HMAC).
+- **Messages:** `HELLO` (client → server), `HELLO_ACK` (server → client, carries session_id and port list), `HEARTBEAT` + `HEARTBEAT_ACK` (keepalive), `BYE` (teardown).
+- **Anti-replay:** Sliding window ±60s on timestamp, 1024-entry LRU nonce cache per session.
+
+Use `--control-mac {legacy|siphash}` to choose the MAC algorithm (both sides must match). Defaults to `legacy` for zero additional overhead.
+
 ### Full Options
 ```
 UDPspeeder V2

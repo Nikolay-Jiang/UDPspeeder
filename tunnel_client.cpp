@@ -1,4 +1,16 @@
 #include "tunnel.h"
+#include "control_proto.h"
+
+// --- port-range-mode client state machine ---
+enum ctrl_state_t { CTRL_IDLE, CTRL_HANDSHAKING, CTRL_RUNNING, CTRL_LOST };
+static ctrl_state_t g_ctrl_state = CTRL_IDLE;
+static int g_ctrl_fd = -1;
+static address_t::storage_t g_ctrl_server_stor;
+static socklen_t g_ctrl_server_len = 0;
+static int g_hello_miss = 0;     // consecutive heartbeat misses (reused for hello retries)
+static int g_hb_miss = 0;
+
+static uint8_t g_session_id[16];  // random, set on first HELLO
 
 void data_from_local_or_fec_timeout(conn_info_t &conn_info, int is_time_out) {
     fd64_t &remote_fd64 = conn_info.remote_fd64;
@@ -13,9 +25,19 @@ void data_from_local_or_fec_timeout(conn_info_t &conn_info, int is_time_out) {
     int *out_len;
     my_time_t *out_delay;
     dest_t dest;
-    dest.type = type_fd64;
-    dest.inner.fd64 = remote_fd64;
-    dest.cook = 1;
+    if (port_range_mode && port_range_mgr.is_ready()) {
+        dest.type = type_fd_addr;
+        dest.inner.fd_addr.fd   = conn_info.remote_fd;
+        dest.inner.fd_addr.addr = port_range_mgr.next_dest();
+        dest.cook = 1;
+    } else if (port_range_mode) {
+        // Handshake not complete yet — drop
+        return;
+    } else {
+        dest.type = type_fd64;
+        dest.inner.fd64 = remote_fd64;
+        dest.cook = 1;
+    }
 
     if (is_time_out) {
         // fd64_t fd64=events[idx].data.u64;
@@ -262,6 +284,108 @@ static void prepare_cb(struct ev_loop *loop, struct ev_prepare *watcher, int rev
     delay_manager.check();
 }
 
+static void ctrl_send_hello() {
+    ctrl_hello_payload_t hello;
+    memcpy(hello.session_id, g_session_id, 16);
+    int out_len;
+    char *pkt = ctrl_encode(CTRL_HELLO, &hello, sizeof(hello), &out_len);
+    if (!pkt) return;
+    sendto(g_ctrl_fd, pkt, out_len, 0,
+           (struct sockaddr *)&g_ctrl_server_stor, g_ctrl_server_len);
+    mylog(log_debug, "ctrl: sent HELLO\n");
+}
+
+static void ctrl_send_heartbeat() {
+    ctrl_hb_payload_t hb;
+    memcpy(hb.session_id, g_session_id, 16);
+    int out_len;
+    char *pkt = ctrl_encode(CTRL_HEARTBEAT, &hb, sizeof(hb), &out_len);
+    if (!pkt) return;
+    sendto(g_ctrl_fd, pkt, out_len, 0,
+           (struct sockaddr *)&g_ctrl_server_stor, g_ctrl_server_len);
+    mylog(log_debug, "ctrl: sent HEARTBEAT\n");
+}
+
+// ev_timer callback: periodic hello retry / heartbeat
+static void ctrl_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents) {
+    assert(!(revents & EV_ERROR));
+    (void)loop;
+
+    if (g_ctrl_state == CTRL_HANDSHAKING) {
+        ctrl_send_hello();
+        // Cap retry interval at hello_retry_max_sec via doubling in the caller
+    } else if (g_ctrl_state == CTRL_RUNNING) {
+        ctrl_send_heartbeat();
+        g_hb_miss++;
+        if (g_hb_miss >= heartbeat_loss_threshold) {
+            mylog(log_warn, "ctrl: %d heartbeats missed, re-handshaking\n", g_hb_miss);
+            g_ctrl_state = CTRL_HANDSHAKING;
+            g_hb_miss = 0;
+            port_range_mgr.ready = false;
+            // Reset timer to 1s retry
+            ev_timer_stop(loop, watcher);
+            ev_timer_set(watcher, 1.0, 1.0);
+            ev_timer_start(loop, watcher);
+            ctrl_send_hello();
+        }
+    } else if (g_ctrl_state == CTRL_LOST) {
+        g_ctrl_state = CTRL_HANDSHAKING;
+        g_hb_miss = 0;
+        port_range_mgr.ready = false;
+        ctrl_send_hello();
+    }
+}
+
+// ev_io callback: receive on control socket
+static void ctrl_remote_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+    assert(!(revents & EV_ERROR));
+    (void)watcher;
+
+    static char buf[CTRL_BUF_MAX];
+    address_t::storage_t src_stor;
+    socklen_t src_len = sizeof(src_stor);
+    int len = recvfrom(g_ctrl_fd, buf, sizeof(buf) - 1, 0,
+                       (struct sockaddr *)&src_stor, &src_len);
+    if (len <= 0) return;
+
+    uint8_t *payload;
+    int payload_len;
+    int msg_type = ctrl_decode(buf, len, &payload, &payload_len);
+    if (msg_type < 0) return;
+
+    if (msg_type == CTRL_HELLO_ACK && g_ctrl_state == CTRL_HANDSHAKING) {
+        int min_sz = (int)(sizeof(ctrl_hello_ack_hdr_t));
+        if (payload_len < min_sz) return;
+        ctrl_hello_ack_hdr_t *ack = (ctrl_hello_ack_hdr_t *)payload;
+        int n = (int)ack->port_count;
+        if (n < 1 || n > 256) return;
+        if (payload_len < min_sz + n * 2) return;
+
+        uint16_t *ports = (uint16_t *)(payload + sizeof(ctrl_hello_ack_hdr_t));
+
+        // base addr = server's ctrl addr but we just need the IP
+        address_t base = ctrl_addr;
+        port_range_mgr.set_from_ack(ports, n, base);
+
+        g_ctrl_state = CTRL_RUNNING;
+        g_hb_miss = 0;
+        mylog(log_info, "ctrl: HELLO_ACK received — %d data ports, port-range-mode active\n", n);
+
+        // Switch timer to heartbeat interval
+        ev_timer *t = (ev_timer *)loop;  // need handle — passed via watcher->data
+        ev_timer *ht = (ev_timer *)watcher->data;
+        if (ht) {
+            ev_timer_stop(loop, ht);
+            ev_timer_set(ht, (double)heartbeat_interval_sec, (double)heartbeat_interval_sec);
+            ev_timer_start(loop, ht);
+        }
+
+    } else if (msg_type == CTRL_HEARTBEAT_ACK && g_ctrl_state == CTRL_RUNNING) {
+        g_hb_miss = 0;
+        mylog(log_debug, "ctrl: HEARTBEAT_ACK received\n");
+    }
+}
+
 int tunnel_client_event_loop() {
     int i, j, k;
     int ret;
@@ -305,24 +429,50 @@ int tunnel_client_event_loop() {
     int &remote_fd = conn_info.remote_fd;
     fd64_t &remote_fd64 = conn_info.remote_fd64;
 
-    assert(new_connected_socket2(remote_fd, remote_addr, out_addr, out_interface) == 0);
-    remote_fd64 = fd_manager.create(remote_fd);
-
-    mylog(log_debug, "remote_fd64=%llu\n", remote_fd64);
-
-    // ev.events = EPOLLIN;
-    // ev.data.u64 = remote_fd64;
-
-    // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, remote_fd, &ev);
-    // if (ret!= 0) {
-    //	mylog(log_fatal,"add raw_fd error\n");
-    //	myexit(-1);
-    // }
-
     struct ev_io remote_watcher;
+    ev_io ctrl_watcher_client;
+    ev_timer ctrl_timer;
+
+    if (port_range_mode) {
+        // Unconnected data socket — sendto with varying dst port
+        address_t ephemeral;
+        ephemeral.from_str((char *)"0.0.0.0:0");
+        assert(new_listen_socket2(remote_fd, ephemeral) == 0);
+        remote_fd64 = fd_manager.create(remote_fd);
+
+        // Control socket
+        assert(new_listen_socket2(g_ctrl_fd, ephemeral) == 0);
+        memset(&g_ctrl_server_stor, 0, sizeof(g_ctrl_server_stor));
+        g_ctrl_server_len = ctrl_addr.get_len();
+        memcpy(&g_ctrl_server_stor, &ctrl_addr.inner, g_ctrl_server_len);
+
+        // Seed session_id
+        uint64_t r1 = get_fake_random_number_64();
+        uint64_t r2 = get_fake_random_number_64();
+        memcpy(g_session_id,     &r1, 8);
+        memcpy(g_session_id + 8, &r2, 8);
+
+        // Register control recv watcher
+        ctrl_watcher_client.data = &ctrl_timer;
+        ev_io_init(&ctrl_watcher_client, ctrl_remote_cb, g_ctrl_fd, EV_READ);
+        ev_io_start(loop, &ctrl_watcher_client);
+
+        // Handshake timer (1s initial interval)
+        ev_init(&ctrl_timer, ctrl_timer_cb);
+        ev_timer_set(&ctrl_timer, 0.0, 1.0);
+        ev_timer_start(loop, &ctrl_timer);
+
+        g_ctrl_state = CTRL_HANDSHAKING;
+        ctrl_send_hello();
+        mylog(log_info, "port-range-mode: sent initial HELLO to %s\n", ctrl_addr.get_str());
+    } else {
+        assert(new_connected_socket2(remote_fd, remote_addr, out_addr, out_interface) == 0);
+        remote_fd64 = fd_manager.create(remote_fd);
+        mylog(log_debug, "remote_fd64=%llu\n", remote_fd64);
+    }
+
     remote_watcher.data = &conn_info;
     remote_watcher.u64 = remote_fd64;
-
     ev_io_init(&remote_watcher, remote_cb, remote_fd, EV_READ);
     ev_io_start(loop, &remote_watcher);
 

@@ -6,6 +6,11 @@
  */
 
 #include "tunnel.h"
+#include "control_proto.h"
+#include <vector>
+
+// port-range-mode: server data fds indexed by fd_idx
+static std::vector<int> g_data_fds;
 
 static void conn_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 static void fec_encode_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
@@ -39,8 +44,14 @@ void data_from_remote_or_fec_timeout_or_conn_timer(conn_info_t &conn_info, fd64_
     my_time_t *out_delay;
 
     dest_t dest;
-    dest.inner.fd_addr.fd = local_listen_fd;
-    dest.inner.fd_addr.addr = addr;
+    if (port_range_mode && !conn_info.active_endpoints.empty()) {
+        conn_info_t::nat_endpoint_t *ep = conn_info.pick_next_endpoint(nat_keepalive_sec);
+        dest.inner.fd_addr.fd  = g_data_fds[ep->fd_idx];
+        dest.inner.fd_addr.addr = ep->addr;
+    } else {
+        dest.inner.fd_addr.fd  = local_listen_fd;
+        dest.inner.fd_addr.addr = addr;
+    }
     dest.type = type_fd_addr;
     dest.cook = 1;
 
@@ -204,6 +215,11 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
         conn_info_t &conn_info = conn_manager.find_insert(addr);
         conn_info.update_active_time();
 
+        if (port_range_mode) {
+            int fd_idx = (int)(intptr_t)watcher->data;
+            conn_info.record_endpoint(addr, fd_idx);
+        }
+
         int out_n;
         char **out_arr;
         int *out_len;
@@ -325,6 +341,75 @@ static void global_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int 
     mylog(log_trace, "events[idx].data.u64==(u64_t)timer.get_timer_fd()\n");
 }
 
+static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+    assert(!(revents & EV_ERROR));
+    (void)loop;
+
+    int ctrl_fd = watcher->fd;
+    static char buf[CTRL_BUF_MAX];
+    address_t::storage_t src_stor;
+    socklen_t src_len = sizeof(src_stor);
+
+    int len = recvfrom(ctrl_fd, buf, sizeof(buf) - 1, 0,
+                       (struct sockaddr *)&src_stor, &src_len);
+    if (len <= 0) return;
+
+    uint8_t *payload;
+    int payload_len;
+    int msg_type = ctrl_decode(buf, len, &payload, &payload_len);
+    if (msg_type < 0) return;
+
+    address_t src;
+    src.from_sockaddr((struct sockaddr *)&src_stor, src_len);
+
+    if (msg_type == CTRL_HELLO) {
+        if (payload_len < (int)sizeof(ctrl_hello_payload_t)) return;
+        ctrl_hello_payload_t *hello = (ctrl_hello_payload_t *)payload;
+
+        ctrl_hello_ack_hdr_t ack_hdr;
+        memcpy(ack_hdr.session_id, hello->session_id, 16);
+        ack_hdr.port_count            = (uint16_t)port_range_mgr.count();
+        ack_hdr.heartbeat_interval_ms = (uint32_t)(heartbeat_interval_sec * 1000);
+        ack_hdr.session_lifetime_ms   = 0;  // unused in v1
+
+        // Build payload: ack_hdr + ports array
+        static char ack_payload[sizeof(ctrl_hello_ack_hdr_t) + 256 * 2];
+        memcpy(ack_payload, &ack_hdr, sizeof(ack_hdr));
+        for (int i = 0; i < port_range_mgr.count(); i++) {
+            uint16_t p = port_range_mgr.ports[i];
+            memcpy(ack_payload + sizeof(ack_hdr) + i * 2, &p, 2);
+        }
+        int ack_payload_len = (int)sizeof(ack_hdr) + port_range_mgr.count() * 2;
+
+        int out_len;
+        char *pkt = ctrl_encode(CTRL_HELLO_ACK, ack_payload, ack_payload_len, &out_len);
+        if (!pkt) return;
+
+        sendto(ctrl_fd, pkt, out_len, 0,
+               (struct sockaddr *)&src_stor, src_len);
+        mylog(log_info, "ctrl: HELLO from %s, sent HELLO_ACK (%d ports)\n",
+              src.get_str(), port_range_mgr.count());
+
+    } else if (msg_type == CTRL_HEARTBEAT) {
+        if (payload_len < (int)sizeof(ctrl_hb_payload_t)) return;
+        ctrl_hb_payload_t *hb = (ctrl_hb_payload_t *)payload;
+
+        ctrl_hb_payload_t hb_ack;
+        memcpy(hb_ack.session_id, hb->session_id, 16);
+
+        int out_len;
+        char *pkt = ctrl_encode(CTRL_HEARTBEAT_ACK, &hb_ack, sizeof(hb_ack), &out_len);
+        if (!pkt) return;
+
+        sendto(ctrl_fd, pkt, out_len, 0,
+               (struct sockaddr *)&src_stor, src_len);
+        mylog(log_debug, "ctrl: HEARTBEAT from %s\n", src.get_str());
+
+    } else if (msg_type == CTRL_BYE) {
+        mylog(log_info, "ctrl: BYE from %s\n", src.get_str());
+    }
+}
+
 int tunnel_server_event_loop() {
     int i, j, k;
     int ret;
@@ -332,46 +417,66 @@ int tunnel_server_event_loop() {
     // int epoll_fd;
     // int remote_fd;
 
-    int local_listen_fd;
-    new_listen_socket2(local_listen_fd, local_addr);
-
-    // epoll_fd = epoll_create1(0);
-    // assert(epoll_fd>0);
-
-    // const int max_events = 4096;
-    // struct epoll_event ev, events[max_events];
-    // if (epoll_fd < 0) {
-    //	mylog(log_fatal,"epoll return %d\n", epoll_fd);
-    //	myexit(-1);
-    // }
-
     struct ev_loop *loop = ev_default_loop(0);
     assert(loop != NULL);
 
-    // ev.events = EPOLLIN;
-    // ev.data.u64 = local_listen_fd;
-    // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, local_listen_fd, &ev);
-    // if (ret!=0) {
-    //	mylog(log_fatal,"add  udp_listen_fd error\n");
-    //	myexit(-1);
-    // }
+    // Dynamically allocated watchers for port-range-mode data + control fds.
+    std::vector<ev_io *> data_watchers;
+    ev_io ctrl_watcher;
+    int local_listen_fd = -1;
     struct ev_io local_listen_watcher;
-    ev_io_init(&local_listen_watcher, local_listen_cb, local_listen_fd, EV_READ);
-    ev_io_start(loop, &local_listen_watcher);
 
-    // ev.events = EPOLLIN;
-    // ev.data.u64 = delay_manager.get_timer_fd();
-    // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, delay_manager.get_timer_fd(), &ev);
-    // if (ret!= 0) {
-    //	mylog(log_fatal,"add delay_manager.get_timer_fd() error\n");
-    //	myexit(-1);
-    // }
+    if (port_range_mode) {
+        // Build a valid 0.0.0.0 base address for binding; local_addr may be
+        // unset when -l is omitted in port-range-mode server.
+        address_t bind_base;
+        if (local_addr.is_vaild()) {
+            bind_base = local_addr;
+        } else {
+            u32_t any = INADDR_ANY;
+            bind_base.from_ip_port_new(AF_INET, &any, 0);
+        }
+
+        // Bind control socket
+        int ctrl_fd;
+        address_t ctrl_bind_addr = bind_base;
+        ctrl_bind_addr.set_port(ctrl_port);
+        if (new_listen_socket2(ctrl_fd, ctrl_bind_addr) != 0) {
+            mylog(log_fatal, "failed to bind control port %d\n", ctrl_port);
+            myexit(-1);
+        }
+        ev_io_init(&ctrl_watcher, control_listen_cb, ctrl_fd, EV_READ);
+        ev_io_start(loop, &ctrl_watcher);
+        mylog(log_info, "port-range-mode: control port %d listening\n", ctrl_port);
+
+        // Bind N data sockets
+        g_data_fds.clear();
+        for (int i = 0; i < port_range_mgr.count(); i++) {
+            int dfd;
+            address_t data_bind = bind_base;
+            data_bind.set_port(port_range_mgr.ports[i]);
+            if (new_listen_socket2(dfd, data_bind) != 0) {
+                mylog(log_fatal, "failed to bind data port %d\n", port_range_mgr.ports[i]);
+                myexit(-1);
+            }
+            g_data_fds.push_back(dfd);
+
+            ev_io *dw = new ev_io;
+            dw->data = (void *)(intptr_t)i;  // fd_idx
+            ev_io_init(dw, local_listen_cb, dfd, EV_READ);
+            ev_io_start(loop, dw);
+            data_watchers.push_back(dw);
+        }
+        mylog(log_info, "port-range-mode: %d data ports listening (%s)\n",
+              port_range_mgr.count(), data_port_range_str);
+    } else {
+        new_listen_socket2(local_listen_fd, local_addr);
+        ev_io_init(&local_listen_watcher, local_listen_cb, local_listen_fd, EV_READ);
+        ev_io_start(loop, &local_listen_watcher);
+        mylog(log_info, "now listening at %s\n", local_addr.get_str());
+    }
 
     delay_manager.set_loop_and_cb(loop, delay_manager_cb);
-
-    // mylog(log_debug," delay_manager.get_timer_fd() =%d\n", delay_manager.get_timer_fd());
-
-    mylog(log_info, "now listening at %s\n", local_addr.get_str());
 
     // my_timer_t timer;
     // timer.add_fd_to_epoll(epoll_fd);

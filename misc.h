@@ -13,6 +13,7 @@
 #include "fd_manager.h"
 #include "delay_manager.h"
 #include "fec_manager.h"
+#include "port_range_manager.h"
 
 extern char fifo_file[1000];
 
@@ -51,6 +52,18 @@ extern int delay_capacity;
 extern int io_batch_size;
 
 extern int keep_reconnect;
+
+// port-range mode
+extern int port_range_mode;
+extern int ctrl_port;
+extern int ctrl_mac_mode;
+extern int nat_keepalive_sec;
+extern int hello_retry_max_sec;
+extern int heartbeat_interval_sec;
+extern int heartbeat_loss_threshold;
+extern address_t ctrl_addr;
+extern char data_port_range_str[64];
+extern port_range_manager_t port_range_mgr;
 
 extern int tun_mtu;
 
