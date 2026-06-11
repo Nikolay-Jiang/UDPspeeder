@@ -156,13 +156,19 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
         init = true;
     }
 
+    // Cap drain rounds so a sustained sender can't keep recvmmsg returning full
+    // batches forever and starve the FEC-timeout/delay/heartbeat/other watchers.
+    // Up to max_drain_rounds*io_batch_size packets per callback before we yield.
+    const int max_drain_rounds = 16;
+    for (int drain_round = 0; drain_round < max_drain_rounds; drain_round++) {
     for (int i = 0; i < io_batch_size; i++)
         batch_msgs[i].msg_hdr.msg_namelen = sizeof(address_t::storage_t);
 
     int nrecv = recvmmsg(local_listen_fd, batch_msgs, io_batch_size, MSG_DONTWAIT, NULL);
     if (nrecv <= 0) {
-        mylog(log_error, "recvmmsg error,err=%s,but we can try to continue\n", get_sock_error());
-        return;
+        if (errno != EAGAIN && errno != EWOULDBLOCK)
+            mylog(log_error, "recvmmsg error,err=%s,but we can try to continue\n", get_sock_error());
+        break;
     }
 
     my_send_batch_begin();
@@ -274,6 +280,8 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
         }
     }
     my_send_flush();
+    if (nrecv < io_batch_size) break;
+    } // drain loop
 }
 
 static void remote_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
