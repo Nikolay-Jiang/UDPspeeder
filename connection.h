@@ -265,7 +265,7 @@ struct conn_info_t : not_copy_able_t  // stores info for a raw connection.for cl
         my_time_t last_seen_us;
     };
     std::vector<nat_endpoint_t> active_endpoints;
-    int reply_rr_counter = 0;
+    size_t reply_rr_counter = 0;   // unsigned: wraps cleanly, never goes negative
 
     void record_endpoint(const address_t &src, int fd_idx) {
         my_time_t now = get_current_time_us();

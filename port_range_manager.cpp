@@ -36,7 +36,7 @@ void port_range_manager_t::set_from_ack(const uint16_t *p, int n, const address_
 
 address_t port_range_manager_t::next_dest() {
     address_t addr = server_base_addr;
-    addr.set_port(ports[rr_counter % (int)ports.size()]);
-    rr_counter++;
+    addr.set_port(ports[rr_counter]);
+    if (++rr_counter >= ports.size()) rr_counter = 0;
     return addr;
 }

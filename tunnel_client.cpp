@@ -25,14 +25,20 @@ void data_from_local_or_fec_timeout(conn_info_t &conn_info, int is_time_out) {
     int *out_len;
     my_time_t *out_delay;
     dest_t dest;
+    bool can_send = true;
     if (port_range_mode && port_range_mgr.is_ready()) {
         dest.type = type_fd_addr;
         dest.inner.fd_addr.fd   = conn_info.remote_fd;
         dest.inner.fd_addr.addr = port_range_mgr.next_dest();
         dest.cook = 1;
     } else if (port_range_mode) {
-        // Handshake not complete yet — drop
-        return;
+        // Handshake not complete yet — we have no valid dest, so the output will
+        // be dropped below. But we must NOT early-return: the local_listen fd is
+        // level-triggered, so returning without recvfrom-draining it busy-loops at
+        // 100% CPU; and the FEC timeout timer is one-shot, so skipping its flush
+        // strands the half-filled encode group. Fall through, process input, drop
+        // output.
+        can_send = false;
     } else {
         dest.type = type_fd64;
         dest.inner.fd64 = remote_fd64;
@@ -108,8 +114,10 @@ void data_from_local_or_fec_timeout(conn_info_t &conn_info, int is_time_out) {
         from_normal_to_fec(conn_info, new_data, new_len, out_n, out_arr, out_len, out_delay);
     }
     mylog(log_trace, "out_n=%d\n", out_n);
-    for (int i = 0; i < out_n; i++) {
-        delay_send(out_delay[i], dest, out_arr[i], out_len[i]);
+    if (can_send) {
+        for (int i = 0; i < out_n; i++) {
+            delay_send(out_delay[i], dest, out_arr[i], out_len[i]);
+        }
     }
 }
 static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {

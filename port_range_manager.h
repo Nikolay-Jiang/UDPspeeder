@@ -8,7 +8,7 @@
 struct port_range_manager_t {
     std::vector<uint16_t> ports;
     address_t server_base_addr;   // server IP; port is varied per packet
-    int rr_counter = 0;
+    size_t rr_counter = 0;   // unsigned: wraps cleanly, never goes negative
     bool ready = false;
 
     // Parse "a-b" string; returns 0 on success, -1 on error.
