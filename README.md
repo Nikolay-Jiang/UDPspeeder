@@ -115,6 +115,16 @@ Some ISPs implement per-5-tuple flow-level rate limiting or QoS: a single UDP 5-
 
 Data packets still use the same on-wire format (obscure, XOR, FEC, etc.); only the socket routing changes. Session management is kept lightweight: a separate control-plane protocol carries the handshake and keepalive, while data packets flow over data ports unchanged.
 
+#### Limitations
+
+**The client must not sit behind a symmetric NAT.** Port-range mode identifies a client on the server purely by the datagram's source address `(ip, port)` — the data plane carries no session id. A symmetric NAT assigns a *different* external source port for each distinct destination port, so a single client sending to N data ports appears to the server as N different source addresses, i.e. **N separate connections** for one logical client. The consequences:
+
+- The upstream `-r` target sees the same logical flow arrive from N alternating source ports, which breaks stateful applications (VPNs, game servers) that track a client by its source port.
+- Each of the N connections runs its own FEC encoder / sequence numbering feeding the client's single decoder, causing reordering and anti-replay drops.
+- Per-connection state and timers multiply by N.
+
+Deployments where the client is **public** or behind a **cone NAT** (full-cone / restricted-cone / port-restricted-cone) are unaffected — those keep one external source port per client, so the server sees exactly one connection. This is the common case for a VPS client or a typical home router. Only *symmetric* NAT (some carrier-grade / enterprise NATs) triggers the fragmentation. Proper session-id-based data-plane routing that would lift this restriction is planned for a future revision.
+
 #### Example
 
 Enable port-range mode with 16 data ports:

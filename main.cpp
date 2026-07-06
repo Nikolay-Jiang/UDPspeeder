@@ -68,6 +68,21 @@ static void print_help() {
 #ifdef __linux__
     printf("    --out-interface       <string>        force all output packets of '-r' end to go through this interface.\n");
 #endif
+    printf("port-range mode options (spread the tunnel across N udp ports to defeat per-flow isp rate limiting):\n");
+    printf("    --port-range-mode                     enable port-range mode. must be set on both sides. off by default.\n");
+    printf("    --control-port        <port>          (server) fixed control/handshake port.\n");
+    printf("    --data-port-range     a-b             (server) inclusive range of data ports, 1..256 ports.\n");
+    printf("    --control-host        ip:port         (client) server's control address to handshake with.\n");
+    printf("    --control-mac         legacy|siphash   control-plane mac. must match on both sides. default: legacy.\n");
+    printf("    --nat-keepalive       <sec>           (server) nat endpoint keepalive, default: 30.\n");
+    printf("    --hello-retry-max     <sec>           (client) max handshake retry backoff, default: 30.\n");
+    printf("    --heartbeat-interval  <sec>           control-plane heartbeat interval, default: 5.\n");
+    printf("    --heartbeat-loss-threshold <n>        missed heartbeats before re-handshake, default: 3.\n");
+    printf("      NOTE: the client must NOT sit behind a symmetric nat. a symmetric nat assigns a different\n");
+    printf("            external source port per destination port, so the server sees one client as N separate\n");
+    printf("            connections -- upstream sessions become unstable and per-connection overhead multiplies.\n");
+    printf("            public clients and cone nats (full-cone / restricted / port-restricted) are fine.\n");
+
     printf("log and help options:\n");
     printf("    --log-level           <number>        0: never    1: fatal   2: error   3: warn \n");
     printf("                                          4: info (default)      5: debug   6: trace\n");
