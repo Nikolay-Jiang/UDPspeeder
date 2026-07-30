@@ -255,10 +255,46 @@ static const char *tier_name(int k) {
     return "激进";
 }
 
+// printf's %-Ns pads by BYTES, but a UTF-8 CJK glyph is 3 bytes and 2 display
+// columns, so byte-padding skews any column whose content is sometimes CJK and
+// sometimes ASCII -- which is exactly the residual column ("0.0000%" vs
+// "目标不可达"). Pad by display width instead.
+static int test_display_width(const char *s) {
+    int w = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        if (*p < 0x80) {
+            p += 1;
+            w += 1;
+        } else {
+            int len = (*p >= 0xf0) ? 4 : (*p >= 0xe0) ? 3 : 2;
+            // Every non-ASCII glyph this report prints is CJK: 2 columns.
+            w += (len >= 3) ? 2 : 1;
+            p += len;
+        }
+    }
+    return w;
+}
+
+// Print s left-aligned in a field of `cols` display columns, then one
+// separator space. `last` omits both padding and separator.
+static void test_print_cell(const char *s, int cols, bool last) {
+    fputs(s, stdout);
+    if (last) return;
+    for (int k = test_display_width(s); k < cols; k++) putchar(' ');
+    putchar(' ');
+}
+
 static void render_tier_row(const tier_t &tr, int k, bool is_default) {
+    printf("  ");
+    test_print_cell(tier_name(k), 4, false);
     if (!tr.feasible) {
-        printf("  %-6s %-8s %-7s %-14s %-9s %s\n",
-               tier_name(k), "-", "-", "目标不可达", "-", "-");
+        test_print_cell("-", 8, false);
+        test_print_cell("-", 7, false);
+        test_print_cell("目标不可达", 14, false);
+        test_print_cell("-", 9, false);
+        test_print_cell("-", 0, true);
+        printf("\n");
         return;
     }
     char fec[32], ims[16], res[32], ovh[16], bw[24];
@@ -270,8 +306,13 @@ static void render_tier_row(const tier_t &tr, int k, bool is_default) {
         snprintf(res, sizeof(res), "%.4f%%", tr.residual * 100.0);
     snprintf(ovh, sizeof(ovh), "%.0f%%", tr.overhead * 100.0);
     snprintf(bw, sizeof(bw), "%.2f Mbps", tr.actual_mbps);
-    printf("  %-6s %-8s %-7s %-14s %-9s %s%s\n",
-           tier_name(k), fec, ims, res, ovh, bw, is_default ? "  *" : "");
+    test_print_cell(fec, 8, false);
+    test_print_cell(ims, 7, false);
+    test_print_cell(res, 14, false);
+    test_print_cell(ovh, 9, false);
+    test_print_cell(bw, 0, true);
+    if (is_default) printf("  *");
+    printf("\n");
 }
 
 static void render_direction(const char *label, const recommendation_t &rec) {
@@ -290,8 +331,14 @@ static void render_direction(const char *label, const recommendation_t &rec) {
     }
 
     printf("\n--- 推荐配置 (%s) ---\n", label);
-    printf("  %-6s %-8s %-7s %-14s %-9s %s\n",
-           "档位", "-f", "-i", "预计残余", "冗余开销", "实际占用");
+    printf("  ");
+    test_print_cell("档位", 4, false);
+    test_print_cell("-f", 8, false);
+    test_print_cell("-i", 7, false);
+    test_print_cell("预计残余", 14, false);
+    test_print_cell("冗余开销", 9, false);
+    test_print_cell("实际占用", 0, true);
+    printf("\n");
     const tier_t *tiers[3] = {&rec.thrifty, &rec.balanced, &rec.aggressive};
     for (int k = 0; k < 3; k++) render_tier_row(*tiers[k], k, k == 1);
     printf("  * = 默认推荐\n");
