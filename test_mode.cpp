@@ -126,7 +126,9 @@ int test_mode_selftest() {
         char buf[TEST_BUF_MAX];
         const char pl[4] = {'a', 'b', 'c', 'd'};
 
+        my_time_t ts_before = get_current_time_us();
         int n = test_encode(TEST_PROBE, 3, 12345, pl, 4, buf, sizeof(buf), 1200);
+        my_time_t ts_after = get_current_time_us();
         TCHECK(n == 1200, "padded encode must return 1200, got %d", n);
 
         test_hdr_t h;
@@ -139,6 +141,15 @@ int test_mode_selftest() {
         TCHECK(plen == 1200 - TEST_HDR_LEN - TEST_MAC_LEN,
                "payload len must include padding, got %d", plen);
         TCHECK(p != 0 && memcmp(p, pl, 4) == 0, "payload bytes must round-trip");
+
+        // The only coverage of write_u64/read_uu64 in the tree. Epoch microseconds
+        // exceed 2^32, so this genuinely exercises the high/low word split.
+        TCHECK(h.send_ts_us >= ts_before && h.send_ts_us <= ts_after,
+               "send_ts_us must round-trip: got %llu, expected within [%llu, %llu]",
+               (unsigned long long)h.send_ts_us,
+               (unsigned long long)ts_before, (unsigned long long)ts_after);
+        TCHECK(h.send_ts_us > 0xffffffffULL,
+               "epoch microseconds must exceed 2^32 so the high word is actually exercised");
 
         // unpadded control message
         int n2 = test_encode(TEST_HELLO, 0, 0, pl, 4, buf, sizeof(buf), 0);
