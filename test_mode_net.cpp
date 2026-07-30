@@ -103,6 +103,21 @@ static void result_wire_unpack(const char *wire, uint32_t pps, double app_mbps,
 }
 
 // ---------------- responder session state ----------------
+//
+// A session is normally closed by TEST_BYE, which the prober only sends on the
+// success path. A prober that was interrupted, killed or crashed never sends
+// it, and since the prober binds an ephemeral port every run, the retry
+// presents a different address_t and is rejected by the source-pinning gate --
+// permanently. So the session must also expire on silence.
+//
+// 45s: the longest legitimate gap between two messages from a live prober is a
+// phase boundary where every control message needs retrying (REQUEST_RESULT
+// 5x2s plus PHASE_BEGIN 5x1s, ~15s), and those retries are themselves traffic
+// the responder sees. 45s leaves ~3x margin over that while still freeing an
+// abandoned session inside a minute. An idle --test-mode responder has nothing
+// to protect, so erring long costs only recovery time.
+static const my_time_t TEST_SESSION_IDLE_LIMIT_US = 45ULL * 1000000ULL;
+
 struct responder_state_t {
     bool               active = false;
     address_t          peer;              // source-pinned to the HELLO sender
@@ -112,6 +127,8 @@ struct responder_state_t {
     tier_t             tiers[TEST_RESULT_NTIERS];   // thrifty, balanced, aggressive
     bool               phase_open = false;
     my_time_t          last_probe_us = 0;
+    my_time_t          last_rx_us = 0;    // any accepted msg from the pinned peer
+
     uint32_t           cur_pps = 0;
     my_time_t          last_mac_warn_ms = 0;
 };
@@ -178,6 +195,10 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         return;
     }
 
+    // Past the gate, a non-HELLO message is by definition from the pinned peer
+    // of an active session: it is proof of life, so it holds off idle expiry.
+    if (mt != TEST_HELLO) g_resp.last_rx_us = get_current_time_us();
+
     if (mt == TEST_HELLO) {
         if (g_resp.active && !(src == g_resp.peer)) {
             mylog(log_info, "test: rejecting concurrent session from %s\n", src.get_str());
@@ -186,6 +207,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.active = true;
         g_resp.peer = src;
         g_resp.phase_open = false;
+        g_resp.last_rx_us = get_current_time_us();
         mylog(log_info, "test: session from %s\n", src.get_str());
         responder_send(w->fd, src, TEST_HELLO_ACK, 0, NULL, 0);
 
@@ -239,6 +261,22 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
 static void responder_timer_cb(struct ev_loop *loop, struct ev_timer *w, int revents) {
     assert(!(revents & EV_ERROR));
     (void)loop; (void)w;
+
+    // Expire an abandoned session (interrupted/killed prober -- no TEST_BYE).
+    // phase_open must be cleared with it, or a stale half-open phase would leak
+    // its trace into the next session's first PHASE_BEGIN.
+    if (g_resp.active) {
+        my_time_t silent_us = get_current_time_us() - g_resp.last_rx_us;
+        if (silent_us > TEST_SESSION_IDLE_LIMIT_US) {
+            mylog(log_info, "test: session with %s expired after %llu s of silence "
+                            "(prober interrupted or gone); accepting new sessions again\n",
+                  g_resp.peer.get_str(), (unsigned long long)(silent_us / 1000000ULL));
+            g_resp.active = false;
+            g_resp.phase_open = false;
+            return;
+        }
+    }
+
     if (!g_resp.phase_open) return;
     my_time_t idle_us = get_current_time_us() - g_resp.last_probe_us;
     my_time_t limit_us = 2000000ULL;   // 2s floor
