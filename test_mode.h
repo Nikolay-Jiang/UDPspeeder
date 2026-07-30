@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include <stdint.h>
+#include <vector>
 
 // ---- CLI-configured globals (defined in misc.cpp) ----
 extern int    test_mode;          // 0/1
@@ -49,6 +50,33 @@ int test_encode(int msg_type, int phase, uint32_t seq,
 
 int test_decode(char *buf, int len, test_hdr_t *hdr_out,
                 uint8_t **payload_out, int *payload_len_out);
+
+const uint32_t TEST_MAX_EXPECTED_N = 10000000;
+
+struct trace_t {
+    uint32_t              expected_n = 0;
+    uint32_t              pps = 0;
+    std::vector<uint8_t>  arrived;         // 0 = lost, 1 = arrived
+    std::vector<uint32_t> recv_ts_rel_us;  // relative to first arrival; 0 if lost
+    my_time_t             first_arrival_us = 0;
+
+    void init(uint32_t n, uint32_t pps_);
+    void record(uint32_t seq, my_time_t now_us);
+};
+
+struct trace_stats_t {
+    uint32_t n;
+    uint32_t arrived_n;
+    uint32_t lost_n;
+    double   loss_rate;     // 0..1
+    uint32_t run_p50;       // loss run length, packets
+    uint32_t run_p95;
+    uint32_t run_max;
+    double   burst_p95_ms;  // run_p95 / pps * 1000
+    double   resolution;    // 1.0 / n
+};
+
+trace_stats_t trace_analyze(const trace_t &t);
 
 // ---- entry points ----
 int test_mode_prober_loop();

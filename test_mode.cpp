@@ -2,6 +2,7 @@
 #include "log.h"
 #include "packet.h"  // key_string
 #include "siphash.h"
+#include <algorithm>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -69,6 +70,72 @@ int test_decode(char *buf, int len, test_hdr_t *hdr_out,
     *payload_out     = (uint8_t *)(buf + TEST_HDR_LEN);
     *payload_len_out = body_len - TEST_HDR_LEN;
     return (int)hdr_out->msg_type;
+}
+
+// ---------------- loss trace + statistics ----------------
+void trace_t::init(uint32_t n, uint32_t pps_) {
+    if (n > TEST_MAX_EXPECTED_N) {
+        mylog(log_fatal, "trace size %u exceeds cap %u\n", n, TEST_MAX_EXPECTED_N);
+        myexit(-1);
+    }
+    expected_n = n;
+    pps = pps_;
+    arrived.assign(n, 0);
+    recv_ts_rel_us.assign(n, 0);
+    first_arrival_us = 0;
+}
+
+void trace_t::record(uint32_t seq, my_time_t now_us) {
+    if (seq >= expected_n) return;   // out of range, ignore
+    if (arrived[seq]) return;        // duplicate, ignore
+    if (first_arrival_us == 0) first_arrival_us = now_us;
+    arrived[seq] = 1;
+    my_time_t rel = (now_us >= first_arrival_us) ? (now_us - first_arrival_us) : 0;
+    if (rel > 0xffffffffULL) rel = 0xffffffffULL;
+    recv_ts_rel_us[seq] = (uint32_t)rel;
+}
+
+static uint32_t percentile_u32(std::vector<uint32_t> &v, double q) {
+    if (v.empty()) return 0;
+    std::sort(v.begin(), v.end());
+    size_t idx = (size_t)(q * (double)(v.size() - 1) + 0.5);
+    if (idx >= v.size()) idx = v.size() - 1;
+    return v[idx];
+}
+
+trace_stats_t trace_analyze(const trace_t &t) {
+    trace_stats_t st;
+    memset(&st, 0, sizeof(st));
+    st.n = t.expected_n;
+    if (st.n == 0) return st;
+
+    std::vector<uint32_t> runs;
+    uint32_t cur = 0;
+    for (uint32_t s = 0; s < t.expected_n; s++) {
+        if (t.arrived[s]) {
+            st.arrived_n++;
+            if (cur > 0) { runs.push_back(cur); cur = 0; }
+        } else {
+            st.lost_n++;
+            cur++;
+        }
+    }
+    if (cur > 0) runs.push_back(cur);
+
+    st.loss_rate  = (double)st.lost_n / (double)st.n;
+    st.resolution = 1.0 / (double)st.n;
+
+    if (!runs.empty()) {
+        st.run_max = *std::max_element(runs.begin(), runs.end());
+        std::vector<uint32_t> tmp = runs;
+        st.run_p50 = percentile_u32(tmp, 0.50);
+        tmp = runs;
+        st.run_p95 = percentile_u32(tmp, 0.95);
+    }
+    if (t.pps > 0) {
+        st.burst_p95_ms = (double)st.run_p95 / (double)t.pps * 1000.0;
+    }
+    return st;
 }
 
 // ---------------- selftest harness ----------------
@@ -173,6 +240,62 @@ int test_mode_selftest() {
         // over-capacity request must be refused
         TCHECK(test_encode(TEST_PROBE, 0, 0, pl, 4, buf, 32, 1200) == -1,
                "encode must refuse when out_cap too small");
+    }
+
+    // ---- trace + stats ----
+    {
+        trace_t t;
+        t.init(1000, 200);
+        TCHECK(t.arrived.size() == 1000, "init must size arrived to n");
+
+        // all arrive
+        for (uint32_t s = 0; s < 1000; s++) t.record(s, 1000000ULL + s * 5000ULL);
+        trace_stats_t st = trace_analyze(t);
+        TCHECK(st.arrived_n == 1000, "all-arrive: arrived_n must be 1000, got %u", st.arrived_n);
+        TCHECK(st.lost_n == 0, "all-arrive: lost_n must be 0, got %u", st.lost_n);
+        TCHECK(st.loss_rate == 0.0, "all-arrive: loss_rate must be 0");
+        TCHECK(st.run_max == 0, "all-arrive: run_max must be 0, got %u", st.run_max);
+
+        // duplicate must not double-count
+        t.record(0, 9999999ULL);
+        st = trace_analyze(t);
+        TCHECK(st.arrived_n == 1000, "duplicate must be ignored, got %u", st.arrived_n);
+
+        // out-of-order must not count as loss
+        trace_t t2;
+        t2.init(4, 200);
+        t2.record(3, 1000);
+        t2.record(1, 2000);
+        t2.record(0, 3000);
+        t2.record(2, 4000);
+        trace_stats_t st2 = trace_analyze(t2);
+        TCHECK(st2.lost_n == 0, "out-of-order must not count as loss, got %u", st2.lost_n);
+
+        // fixed burst pattern: every 100th block loses exactly 5 in a row
+        trace_t t3;
+        t3.init(1000, 200);
+        for (uint32_t s = 0; s < 1000; s++) {
+            bool lost = (s % 100) < 5;
+            if (!lost) t3.record(s, 1000000ULL + s * 5000ULL);
+        }
+        trace_stats_t st3 = trace_analyze(t3);
+        TCHECK(st3.lost_n == 50, "burst trace must lose 50, got %u", st3.lost_n);
+        TCHECK(st3.run_max == 5, "burst run_max must be 5, got %u", st3.run_max);
+        TCHECK(st3.run_p95 == 5, "burst run_p95 must be 5, got %u", st3.run_p95);
+        // 5 packets at 200pps == 25ms
+        TCHECK(fabs(st3.burst_p95_ms - 25.0) < 0.001,
+               "burst_p95_ms must be 25.0, got %f", st3.burst_p95_ms);
+        TCHECK(fabs(st3.resolution - 0.001) < 1e-9,
+               "resolution must be 1/1000, got %f", st3.resolution);
+
+        // isolated losses -> run_p95 == 1
+        trace_t t4;
+        t4.init(1000, 200);
+        for (uint32_t s = 0; s < 1000; s++) {
+            if (s % 50 != 0) t4.record(s, 1000000ULL + s * 5000ULL);
+        }
+        trace_stats_t st4 = trace_analyze(t4);
+        TCHECK(st4.run_max == 1, "isolated losses: run_max must be 1, got %u", st4.run_max);
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
