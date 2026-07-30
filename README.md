@@ -166,6 +166,108 @@ The control plane uses an independent packet structure (version, msg_type, nonce
 
 Use `--control-mac {legacy|siphash}` to choose the MAC algorithm (both sides must match). Defaults to `legacy` for zero additional overhead.
 
+### Test Mode (Measure the Link, Recommend FEC Parameters)
+
+**Note:** This feature is optional. It turns the program into a one-shot link
+prober instead of a tunnel, then exits.
+
+#### What it does
+
+`--test-mode` measures real upstream (client → server) packet loss on the
+link and recommends `-f x:y -i n` settings from what it measured, instead of
+you guessing. Currently only the client → server direction is measured; the
+report has no server → client section (a future revision may add it).
+
+- **Responder** (far end, just answers probes): `-s --test-mode -l <ip:port>`
+- **Prober** (drives the measurement, prints the report): `-c --test-mode -r <ip:port>`
+- `-k` is **mandatory** on both sides: probes are MAC-authenticated, so an
+  open responder cannot be driven by an unauthenticated party (e.g. used as a
+  UDP reflector).
+
+#### How to run it
+
+```bash
+# responder (far end)
+./speederv2 -s --test-mode -l0.0.0.0:4096 -k "passwd"
+
+# prober (drives the test, prints the report)
+./speederv2 -c --test-mode -r<server_ip>:4096 -k "passwd" \
+    --test-duration 30 --test-pps 200 --test-pkt-size 1200 --test-app-mbps 5
+```
+
+Add `--data-port-range a-b` on **both** sides to also compare single-port vs.
+N-port upstream loss. It is the same flag documented under
+[Port-Range Mode](#port-range-mode-defeat-per-flow-isp-rate-limiting) above;
+`--port-range-mode` itself is not required in test mode.
+
+| Option | Default | Range | Meaning |
+|---|---|---|---|
+| `--test-duration <sec>` | 30 | 1–600 | duration of each full-length measurement pass |
+| `--test-pps <number>` | 200 | 1–20000 | probe packet rate |
+| `--test-pkt-size <number>` | 1200 | 64–1400 | probe packet size |
+| `--test-app-mbps <number>` | probe rate | — | your real payload rate; used only to convert redundancy overhead into an absolute Mbps figure |
+| `--test-selftest` | — | — | run the evaluator's self-checks against synthetic traces and exit; touches no network |
+
+Total runtime is the fixed 30-second rate scan (3 × 10s, independent of
+`--test-duration`) plus one `--test-duration` pass, plus a second
+`--test-duration` pass if `--data-port-range` is set. With the defaults
+that's roughly 1 minute for a single-port run, or about 1.5 minutes with
+`--data-port-range`; even a minimal run (`--test-duration 1`) takes about 30
+seconds, because of the fixed scan.
+
+#### Reading the report
+
+The report currently prints its section headings and labels in Chinese (for
+example the three tiers are named 省流 / 均衡 / 激进 — thrifty / balanced /
+aggressive). This section explains its content and structure in English so
+the numbers can be interpreted regardless of the label language.
+
+The report contains, in order:
+
+1. **Loss-nature verdict.** The rate scan runs the probe at 0.5×, 1× and 2×
+   the nominal `--test-pps`. If loss rises significantly with rate, the loss
+   is policing- or congestion-induced: FEC will not help there, and adding
+   redundancy makes it *worse*, because the extra packets consume more of the
+   throttled capacity. The report says so explicitly instead of recommending
+   more redundancy — the right remedy for that case is spreading traffic
+   (`--data-port-range`), not a bigger `-f`.
+2. **Link characteristics** for the client → server direction: loss rate,
+   loss run-length p50/p95/max, p95 burst duration, and this run's sampling
+   resolution (`1/n`).
+3. **Three candidate configs** — thrifty (residual loss ≤1%), balanced
+   (≤0.1%, the default recommendation), aggressive (≤0.01%) — each with
+   predicted residual loss, redundancy overhead and absolute bandwidth. A
+   tier whose target is below this run's sampling resolution is marked as
+   extrapolated; a target no candidate can reach is reported as unreachable
+   rather than a fabricated number.
+4. **Port-range comparison**, only when `--data-port-range` was given:
+   single-port vs. N-port upstream loss, and whether port-range mode would
+   help on this link.
+5. **A suggested command line** for the balanced tier.
+
+#### How the recommendation is derived
+
+One probe pass records a timestamped loss trace (arrived/lost per sequence
+number). That trace is then replayed against roughly 1500 candidate `x:y`
+pairs. Because Reed-Solomon is a maximum-distance-separable (MDS) code, a
+group of `x` data shards plus `y` redundant shards recovers if and only if at
+least `x` of the `x+y` shards arrive — so residual loss is simply the
+fraction of `(x+y)`-wide sliding windows in the trace containing more than
+`y` losses. This makes no assumption about the loss distribution, which
+matters because bursty loss badly breaks the binomial models a purely
+analytical (non-replay) estimate would need.
+
+`-i` is derived from the trace's measured p95 burst duration
+(`i >= burst_p95_ms * (x+y)/y`, capped at 50ms), but is deliberately
+**excluded** from the residual-loss figure above, because scattering changes
+send timing and the trace was captured unscattered. Recommendations are
+therefore conservative: the real result after applying the recommended `-i`
+should be better than shown, never worse.
+
+Run `--test-selftest` to verify the evaluator's replay logic against
+synthetic traces (isolated loss, bursty loss, total loss, etc.) without
+touching the network.
+
 ### Full Options
 ```
 UDPspeeder V2
