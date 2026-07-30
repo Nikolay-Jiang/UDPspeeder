@@ -605,7 +605,7 @@ int test_mode_prober_loop() {
     // ---- so the user should see that warning before sinking time into the
     // ---- rest of the run (the remaining phases still run; the data still
     // ---- has value even under that warning).
-    const int SCAN_SEC = 10;
+    const int SCAN_SEC = TEST_RATE_SCAN_SEC;
     int scan_pps[3] = {test_pps / 2, test_pps, test_pps * 2};
     if (scan_pps[0] < 1) scan_pps[0] = 1;
     double scan_p[3];

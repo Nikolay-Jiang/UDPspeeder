@@ -17,6 +17,23 @@ const int TEST_PPS_MAX      = 20000;
 const int TEST_PKT_SIZE_MAX = 1400;
 const int TEST_PKT_SIZE_MIN = 64;
 
+// Each of the three rate-scan sub-phases runs for this long.
+const int TEST_RATE_SCAN_SEC = 10;
+
+// Cap on probes in a single phase, enforced at parse time (misc.cpp).
+//
+// The responder blocks its whole ev loop inside responder_finalize_phase()
+// while test_pick_tiers() sweeps ~1425 FEC candidates over an n-sample trace.
+// Measured on this tree, all three tiers together: n=200k -> 0.31s,
+// n=500k -> 0.78s, n=600k -> 0.78s (cost is trace-shape independent). The
+// prober allows 5 x 2s for REQUEST_RESULT, so 500k leaves >12x margin, while
+// the previously-legal 600k combination (--test-pps 20000 at the default
+// --test-duration 30) used to cost ~13s and killed the run outright.
+//
+// There is no measurement value above this either: 500k samples resolve loss
+// to 0.0002%, already 50x finer than the tightest tier target (0.01%).
+const long long TEST_MAX_TOTAL_PROBES = 500000;
+
 // ---- wire protocol ----
 enum test_msg_t {
     TEST_HELLO = 1,

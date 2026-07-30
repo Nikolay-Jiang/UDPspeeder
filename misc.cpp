@@ -1027,6 +1027,30 @@ void process_arg(int argc, char *argv[]) {
             mylog(log_fatal, "--test-mode server requires -l <listen_ip:port>\n");
             myexit(-1);
         }
+        // Guard the probe count per phase, not just its two factors: the
+        // responder blocks its entire ev loop while evaluating a phase, and a
+        // combination well inside the documented per-option ranges could push
+        // that past the prober's result-collection budget and kill the run.
+        // The product overflows int at the documented maxima (20000 x 600), so
+        // it is computed in 64 bits.
+        long long probes_main = (long long)test_pps * (long long)test_duration_sec;
+        long long probes_scan = (long long)test_pps * 2LL * (long long)TEST_RATE_SCAN_SEC;
+        long long probes_max  = probes_main > probes_scan ? probes_main : probes_scan;
+        if (probes_max > TEST_MAX_TOTAL_PROBES) {
+            mylog(log_fatal,
+                  "--test-pps %d x --test-duration %d = %lld probes per phase, "
+                  "which exceeds the limit of %lld.\n"
+                  "       (the rate-scan phase probes at 2x --test-pps for %d s, "
+                  "i.e. %lld probes, and is capped by the same limit.)\n"
+                  "       reduce --test-pps or --test-duration. %lld samples already "
+                  "resolve loss down to %.4f%%, far finer than the 0.01%% target of "
+                  "the tightest recommendation tier.\n",
+                  test_pps, test_duration_sec, probes_main,
+                  TEST_MAX_TOTAL_PROBES, TEST_RATE_SCAN_SEC, probes_scan,
+                  TEST_MAX_TOTAL_PROBES, 100.0 / (double)TEST_MAX_TOTAL_PROBES);
+            myexit(-1);
+        }
+
         // Applies to both roles: the responder binds one socket per parsed
         // port, and the prober (Task 9) needs the same parsed list for its
         // multi-port comparison phase. Without this, --data-port-range would
