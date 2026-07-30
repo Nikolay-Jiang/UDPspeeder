@@ -80,6 +80,10 @@ trace_stats_t trace_analyze(const trace_t &t);
 
 // Fraction of sliding windows of size (x+y) containing more than y losses.
 // Returns -1.0 if the window does not fit the trace.
+//
+// Rebuilds an O(n) prefix-sum on every call. Fine for one-off use (and for the
+// selftest, which calls it directly); the tier sweep must NOT call it in a loop
+// -- use test_pick_tiers(), which builds the prefix once. See test_mode.cpp.
 double test_residual(const trace_t &t, int x, int y);
 
 const int TEST_I_CAP_MS = 50;
@@ -106,6 +110,12 @@ struct recommendation_t {
 int test_derive_interval_ms(const trace_stats_t &st, int x, int y);
 
 tier_t test_pick_tier(const trace_t &t, const trace_stats_t &st, double target);
+
+// Picks all three tiers in a single candidate sweep sharing one prefix-sum.
+// Equivalent to three test_pick_tier() calls but ~6x cheaper; the candidate
+// enumeration order -- and therefore every tie-break outcome -- is identical.
+void test_pick_tiers(const trace_t &t, const trace_stats_t &st,
+                     tier_t *thrifty, tier_t *balanced, tier_t *aggressive);
 
 recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size);
 

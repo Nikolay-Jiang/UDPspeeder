@@ -138,24 +138,43 @@ trace_stats_t trace_analyze(const trace_t &t) {
     return st;
 }
 
-double test_residual(const trace_t &t, int x, int y) {
-    if (x < 1 || y < 0) return -1.0;
-    int w = x + y;
-    if (w <= 0 || (uint32_t)w > t.expected_n) return -1.0;
-
-    // prefix[k] = number of losses in [0, k)
-    std::vector<uint32_t> prefix(t.expected_n + 1, 0);
+// prefix[k] = number of losses in [0, k). Built once per sweep, never inside
+// the candidate loop: at n=600k, rebuilding it for each of the ~1425 candidates
+// doubled the cost of an already O(candidates * n) evaluation.
+static void residual_build_prefix(const trace_t &t, std::vector<uint32_t> &prefix) {
+    prefix.assign((size_t)t.expected_n + 1, 0);
     for (uint32_t s = 0; s < t.expected_n; s++) {
         prefix[s + 1] = prefix[s] + (t.arrived[s] ? 0u : 1u);
     }
+}
 
-    uint32_t windows = t.expected_n - (uint32_t)w + 1;
+// Residual against a precomputed prefix sum. Identical arithmetic to
+// test_residual(); that function is just this one plus the prefix build.
+static double residual_with_prefix(const std::vector<uint32_t> &prefix,
+                                   uint32_t expected_n, int x, int y) {
+    if (x < 1 || y < 0) return -1.0;
+    int w = x + y;
+    if (w <= 0 || (uint32_t)w > expected_n) return -1.0;
+
+    uint32_t windows = expected_n - (uint32_t)w + 1;
     uint32_t failed = 0;
     for (uint32_t s = 0; s < windows; s++) {
         uint32_t losses = prefix[s + w] - prefix[s];
         if ((int)losses > y) failed++;
     }
     return (double)failed / (double)windows;
+}
+
+double test_residual(const trace_t &t, int x, int y) {
+    // Cheap rejections first, so a bad candidate does not pay for an O(n)
+    // prefix build it will never read.
+    if (x < 1 || y < 0) return -1.0;
+    int w = x + y;
+    if (w <= 0 || (uint32_t)w > t.expected_n) return -1.0;
+
+    std::vector<uint32_t> prefix;
+    residual_build_prefix(t, prefix);
+    return residual_with_prefix(prefix, t.expected_n, x, y);
 }
 
 // ---------------- -i derivation and three-tier selection ----------------
@@ -167,51 +186,81 @@ int test_derive_interval_ms(const trace_stats_t &st, int x, int y) {
     return (int)ceil(need);
 }
 
-tier_t test_pick_tier(const trace_t &t, const trace_stats_t &st, double target) {
-    tier_t best;
-    memset(&best, 0, sizeof(best));
-    best.feasible = false;
+// Single candidate sweep evaluating `n_targets` residual targets at once.
+// Each candidate's residual is computed once and then tested against every
+// target, instead of re-running the whole sweep (and the whole prefix build)
+// per tier. Candidate enumeration order is unchanged, so every tie-break
+// resolves exactly as it did when each tier had its own sweep.
+static void pick_tiers_impl(const trace_t &t, const trace_stats_t &st,
+                            const double *targets, int n_targets, tier_t *out) {
+    for (int k = 0; k < n_targets; k++) {
+        memset(&out[k], 0, sizeof(tier_t));
+        out[k].feasible = false;
+    }
+
+    std::vector<uint32_t> prefix;
+    residual_build_prefix(t, prefix);
 
     for (int x = 1; x <= TEST_X_MAX; x++) {
         int y_max = 3 * x;
         if (y_max > 254 - x) y_max = 254 - x;
         for (int y = 0; y <= y_max; y++) {
             if ((uint32_t)(x + y) > t.expected_n) continue;
-            double r = test_residual(t, x, y);
-            if (r < 0.0 || r > target) continue;
+            double r = residual_with_prefix(prefix, t.expected_n, x, y);
+            if (r < 0.0) continue;
 
             // Scattering requirement; if it exceeds the cap, prefer more y
-            // (i.e. reject this candidate) per spec section 6.4.
+            // (i.e. reject this candidate) per spec section 6.4. Pure and
+            // cheap, so it is evaluated before the per-target loop.
             int i_ms = test_derive_interval_ms(st, x, y);
             if (i_ms > TEST_I_CAP_MS) continue;
 
             double overhead = (double)y / (double)x;
-            bool better = !best.feasible || overhead < best.overhead - 1e-12;
-            if (!better && fabs(overhead - best.overhead) <= 1e-12) {
-                if (i_ms < best.i_ms) better = true;
-                else if (i_ms == best.i_ms && x > best.x) better = true;
-            }
-            if (better) {
-                best.feasible = true;
-                best.x = x;
-                best.y = y;
-                best.i_ms = i_ms;
-                best.residual = r;
-                best.overhead = overhead;
+            for (int k = 0; k < n_targets; k++) {
+                if (r > targets[k]) continue;
+                tier_t &best = out[k];
+                bool better = !best.feasible || overhead < best.overhead - 1e-12;
+                if (!better && fabs(overhead - best.overhead) <= 1e-12) {
+                    if (i_ms < best.i_ms) better = true;
+                    else if (i_ms == best.i_ms && x > best.x) better = true;
+                }
+                if (better) {
+                    best.feasible = true;
+                    best.x = x;
+                    best.y = y;
+                    best.i_ms = i_ms;
+                    best.residual = r;
+                    best.overhead = overhead;
+                }
             }
         }
     }
-    best.extrapolated = (target < st.resolution);
+    for (int k = 0; k < n_targets; k++)
+        out[k].extrapolated = (targets[k] < st.resolution);
+}
+
+tier_t test_pick_tier(const trace_t &t, const trace_stats_t &st, double target) {
+    tier_t best;
+    pick_tiers_impl(t, st, &target, 1, &best);
     return best;
+}
+
+void test_pick_tiers(const trace_t &t, const trace_stats_t &st,
+                     tier_t *thrifty, tier_t *balanced, tier_t *aggressive) {
+    const double targets[3] = {TIER_THRIFTY_TARGET, TIER_BALANCED_TARGET,
+                               TIER_AGGRESSIVE_TARGET};
+    tier_t out[3];
+    pick_tiers_impl(t, st, targets, 3, out);
+    *thrifty    = out[0];
+    *balanced   = out[1];
+    *aggressive = out[2];
 }
 
 recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size) {
     recommendation_t rec;
     rec.stats = trace_analyze(t);
 
-    rec.thrifty    = test_pick_tier(t, rec.stats, TIER_THRIFTY_TARGET);
-    rec.balanced   = test_pick_tier(t, rec.stats, TIER_BALANCED_TARGET);
-    rec.aggressive = test_pick_tier(t, rec.stats, TIER_AGGRESSIVE_TARGET);
+    test_pick_tiers(t, rec.stats, &rec.thrifty, &rec.balanced, &rec.aggressive);
 
     double hdr_factor = 1.0;
     if (pkt_size > 0) hdr_factor = 1.0 + 16.0 / (double)pkt_size;
@@ -285,7 +334,9 @@ static void test_print_cell(const char *s, int cols, bool last) {
     putchar(' ');
 }
 
-static void render_tier_row(const tier_t &tr, int k, bool is_default) {
+// `resolution` is the direction's sampling resolution (1/n), used to bound the
+// residual column when the tier's target sits below it.
+static void render_tier_row(const tier_t &tr, int k, bool is_default, double resolution) {
     printf("  ");
     test_print_cell(tier_name(k), 4, false);
     if (!tr.feasible) {
@@ -300,10 +351,17 @@ static void render_tier_row(const tier_t &tr, int k, bool is_default) {
     char fec[32], ims[16], res[32], ovh[16], bw[24];
     snprintf(fec, sizeof(fec), "%d:%d", tr.x, tr.y);
     snprintf(ims, sizeof(ims), "%dms", tr.i_ms);
-    if (tr.extrapolated)
-        snprintf(res, sizeof(res), "<%.4f%%(外推)", tr.residual * 100.0);
-    else
+    if (tr.extrapolated) {
+        // A tier is flagged extrapolated when its target is below 1/n, and it is
+        // only selected when residual <= target, so residual < resolution here.
+        // The replay therefore measured a 0 it cannot vouch for: printing
+        // "<0.0000%" would assert exactly the precision the flag exists to deny.
+        // Report the sampling floor, which is the tightest bound n samples
+        // actually support.
+        snprintf(res, sizeof(res), "<%.4f%%(外推)", resolution * 100.0);
+    } else {
         snprintf(res, sizeof(res), "%.4f%%", tr.residual * 100.0);
+    }
     snprintf(ovh, sizeof(ovh), "%.0f%%", tr.overhead * 100.0);
     snprintf(bw, sizeof(bw), "%.2f Mbps", tr.actual_mbps);
     test_print_cell(fec, 8, false);
@@ -340,7 +398,7 @@ static void render_direction(const char *label, const recommendation_t &rec) {
     test_print_cell("实际占用", 0, true);
     printf("\n");
     const tier_t *tiers[3] = {&rec.thrifty, &rec.balanced, &rec.aggressive};
-    for (int k = 0; k < 3; k++) render_tier_row(*tiers[k], k, k == 1);
+    for (int k = 0; k < 3; k++) render_tier_row(*tiers[k], k, k == 1, st.resolution);
     printf("  * = 默认推荐\n");
     printf("  注: 残余丢包为 -i 0 的保守回放估计,实际加 -i 后应优于此值\n");
     printf("  注: 滑窗样本相互重叠,真实置信区间较此估计更宽\n");

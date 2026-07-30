@@ -10,21 +10,95 @@
 #include <vector>
 
 // ---------------- TEST_RESULT wire payload ----------------
-// 40 bytes, little-endian via write_u32. File-static: Task 9's prober packs
-// nothing but unpacks this same layout with read_u32 in this same file.
-static const int TEST_RESULT_WIRE_LEN = 40;
+//
+// 84 bytes of big-endian u32 words (write_u32/read_u32 in common.cpp are
+// big-endian). The responder packs, the prober unpacks; the two halves are
+// kept adjacent below so a future reader always sees both at once.
+//
+//   off  0..23 : 6 trace_stats_t words  -- n, arrived_n, lost_n,
+//                run_p50, run_p95, run_max
+//   off 24..83 : 3 tiers x 20 bytes, in TIER order {thrifty, balanced,
+//                aggressive}; per tier: x, y, i_ms, residual_ppm, flags
+//
+// All three tiers must cross the wire: with only the balanced tier, the report
+// renders the other two rows as "target unreachable" on every run, which is a
+// flat lie whenever the balanced row on the same table shows a met target.
+// Derived fields (loss_rate, resolution, burst_p95_ms, overhead, actual_mbps)
+// are recomputed by the prober rather than sent.
+static const int TEST_RESULT_TIER_LEN  = 20;
+static const int TEST_RESULT_NTIERS    = 3;
+static const int TEST_RESULT_STATS_LEN = 24;
+static const int TEST_RESULT_WIRE_LEN =
+    TEST_RESULT_STATS_LEN + TEST_RESULT_NTIERS * TEST_RESULT_TIER_LEN;   // 84
 
-static void result_wire_pack(char *out, const trace_stats_t &st, const tier_t &tr) {
+// tier flag bits
+static const u32_t TIER_FLAG_FEASIBLE     = 1u << 0;
+static const u32_t TIER_FLAG_EXTRAPOLATED = 1u << 1;
+
+static void result_wire_pack(char *out, const trace_stats_t &st,
+                             const tier_t *tiers /* [TEST_RESULT_NTIERS] */) {
     write_u32(out + 0,  st.n);
     write_u32(out + 4,  st.arrived_n);
     write_u32(out + 8,  st.lost_n);
     write_u32(out + 12, st.run_p50);
     write_u32(out + 16, st.run_p95);
     write_u32(out + 20, st.run_max);
-    write_u32(out + 24, tr.feasible ? (u32_t)tr.x : 0u);
-    write_u32(out + 28, tr.feasible ? (u32_t)tr.y : 0u);
-    write_u32(out + 32, tr.feasible ? (u32_t)tr.i_ms : 0u);
-    write_u32(out + 36, tr.feasible ? (u32_t)(tr.residual * 1e6) : 0u);
+    for (int k = 0; k < TEST_RESULT_NTIERS; k++) {
+        const tier_t &tr = tiers[k];
+        char *p = out + TEST_RESULT_STATS_LEN + k * TEST_RESULT_TIER_LEN;
+        u32_t flags = 0;
+        if (tr.feasible)     flags |= TIER_FLAG_FEASIBLE;
+        if (tr.extrapolated) flags |= TIER_FLAG_EXTRAPOLATED;
+        write_u32(p + 0,  tr.feasible ? (u32_t)tr.x : 0u);
+        write_u32(p + 4,  tr.feasible ? (u32_t)tr.y : 0u);
+        write_u32(p + 8,  tr.feasible ? (u32_t)tr.i_ms : 0u);
+        // residual is 0..1; parts-per-million keeps it well inside u32 and is
+        // 100x finer than the tightest tier target (0.01%).
+        write_u32(p + 12, tr.feasible ? (u32_t)(tr.residual * 1e6) : 0u);
+        write_u32(p + 16, flags);
+    }
+}
+
+// Inverse of result_wire_pack. `wire` must hold at least TEST_RESULT_WIRE_LEN
+// bytes (checked by the caller). Fills the derived fields the sender omitted.
+static void result_wire_unpack(const char *wire, uint32_t pps, double app_mbps,
+                               int pkt_size, trace_stats_t *st_out,
+                               tier_t *tiers_out /* [TEST_RESULT_NTIERS] */) {
+    char *p0 = (char *)wire;   // read_u32 takes char*, but never writes
+    trace_stats_t &st = *st_out;
+    memset(&st, 0, sizeof(st));
+    st.n         = read_u32(p0 + 0);
+    st.arrived_n = read_u32(p0 + 4);
+    st.lost_n    = read_u32(p0 + 8);
+    st.run_p50   = read_u32(p0 + 12);
+    st.run_p95   = read_u32(p0 + 16);
+    st.run_max   = read_u32(p0 + 20);
+    if (st.n > 0) {
+        st.loss_rate  = (double)st.lost_n / (double)st.n;
+        st.resolution = 1.0 / (double)st.n;
+    }
+    if (pps > 0)
+        st.burst_p95_ms = (double)st.run_p95 / (double)pps * 1000.0;
+
+    double hdr_factor = 1.0;
+    if (pkt_size > 0) hdr_factor = 1.0 + 16.0 / (double)pkt_size;
+
+    for (int k = 0; k < TEST_RESULT_NTIERS; k++) {
+        char *p = p0 + TEST_RESULT_STATS_LEN + k * TEST_RESULT_TIER_LEN;
+        tier_t &tr = tiers_out[k];
+        memset(&tr, 0, sizeof(tr));
+        u32_t flags   = read_u32(p + 16);
+        tr.feasible     = (flags & TIER_FLAG_FEASIBLE) != 0;
+        tr.extrapolated = (flags & TIER_FLAG_EXTRAPOLATED) != 0;
+        tr.x        = (int)read_u32(p + 0);
+        tr.y        = (int)read_u32(p + 4);
+        tr.i_ms     = (int)read_u32(p + 8);
+        tr.residual = (double)read_u32(p + 12) / 1e6;
+        if (tr.feasible && tr.x > 0) {
+            tr.overhead    = (double)tr.y / (double)tr.x;
+            tr.actual_mbps = app_mbps * (1.0 + tr.overhead) * hdr_factor;
+        }
+    }
 }
 
 // ---------------- responder session state ----------------
@@ -34,7 +108,7 @@ struct responder_state_t {
     int                phase = 0;
     trace_t            trace;
     trace_stats_t      stats;
-    tier_t             balanced;
+    tier_t             tiers[TEST_RESULT_NTIERS];   // thrifty, balanced, aggressive
     bool               phase_open = false;
     my_time_t          last_probe_us = 0;
     uint32_t           cur_pps = 0;
@@ -48,7 +122,8 @@ static void responder_finalize_phase() {
     if (!g_resp.phase_open) return;
     g_resp.phase_open = false;
     g_resp.stats = trace_analyze(g_resp.trace);
-    g_resp.balanced = test_pick_tier(g_resp.trace, g_resp.stats, TIER_BALANCED_TARGET);
+    test_pick_tiers(g_resp.trace, g_resp.stats,
+                    &g_resp.tiers[0], &g_resp.tiers[1], &g_resp.tiers[2]);
     mylog(log_info, "test: phase %d finalized, loss %.4f%% (%u/%u)\n",
           g_resp.phase, g_resp.stats.loss_rate * 100.0,
           g_resp.stats.lost_n, g_resp.stats.n);
@@ -149,7 +224,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
     } else if (mt == TEST_REQUEST_RESULT) {
         responder_finalize_phase();
         char wire[TEST_RESULT_WIRE_LEN];
-        result_wire_pack(wire, g_resp.stats, g_resp.balanced);
+        result_wire_pack(wire, g_resp.stats, g_resp.tiers);
         responder_send(w->fd, src, TEST_RESULT, g_resp.phase, wire, sizeof(wire));
 
     } else if (mt == TEST_BYE) {
@@ -227,8 +302,12 @@ struct prober_ctx_t {
     int           fd = -1;
     address_t     peer;
     my_time_t     rtt_us = 0;
+    // Set once before the phases run; result_wire_unpack needs them to fill in
+    // the bandwidth column the responder does not know about.
+    double        app_mbps = 0.0;
+    int           pkt_size = 0;
     trace_stats_t result_stats;
-    tier_t        result_tier;
+    tier_t        result_tiers[TEST_RESULT_NTIERS];
 };
 
 static prober_ctx_t g_pr;
@@ -415,29 +494,8 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
         myexit(-1);
     }
 
-    memset(&g_pr.result_stats, 0, sizeof(g_pr.result_stats));
-    g_pr.result_stats.n         = read_u32((char *)wire + 0);
-    g_pr.result_stats.arrived_n = read_u32((char *)wire + 4);
-    g_pr.result_stats.lost_n    = read_u32((char *)wire + 8);
-    g_pr.result_stats.run_p50   = read_u32((char *)wire + 12);
-    g_pr.result_stats.run_p95   = read_u32((char *)wire + 16);
-    g_pr.result_stats.run_max   = read_u32((char *)wire + 20);
-    if (g_pr.result_stats.n > 0) {
-        g_pr.result_stats.loss_rate  = (double)g_pr.result_stats.lost_n / g_pr.result_stats.n;
-        g_pr.result_stats.resolution = 1.0 / (double)g_pr.result_stats.n;
-    }
-    if (pps > 0)
-        g_pr.result_stats.burst_p95_ms = (double)g_pr.result_stats.run_p95 / (double)pps * 1000.0;
-
-    memset(&g_pr.result_tier, 0, sizeof(g_pr.result_tier));
-    uint32_t rx = read_u32((char *)wire + 24);
-    g_pr.result_tier.feasible = (rx != 0);
-    g_pr.result_tier.x        = (int)rx;
-    g_pr.result_tier.y        = (int)read_u32((char *)wire + 28);
-    g_pr.result_tier.i_ms     = (int)read_u32((char *)wire + 32);
-    g_pr.result_tier.residual = (double)read_u32((char *)wire + 36) / 1e6;
-    if (g_pr.result_tier.x > 0)
-        g_pr.result_tier.overhead = (double)g_pr.result_tier.y / g_pr.result_tier.x;
+    result_wire_unpack((const char *)wire, pps, g_pr.app_mbps, g_pr.pkt_size,
+                       &g_pr.result_stats, g_pr.result_tiers);
 
     mylog(log_info, "test: phase %d result -- loss %.4f%% (%u/%u)\n",
           phase, g_pr.result_stats.loss_rate * 100.0,
@@ -488,6 +546,10 @@ int test_mode_prober_loop() {
     snprintf(rep.peer, sizeof(rep.peer), "%s", remote_addr.get_str());
     rep.have_down = false;  // S2/S4 not implemented yet; do not fabricate.
 
+    // result_wire_unpack fills each tier's bandwidth column from these.
+    g_pr.app_mbps = rep.app_mbps;
+    g_pr.pkt_size = rep.pkt_size;
+
     // ---- rate scan first: if loss rises with offered rate it is
     // ---- policing/congestion-induced and the whole FEC premise collapses,
     // ---- so the user should see that warning before sinking time into the
@@ -515,12 +577,10 @@ int test_mode_prober_loop() {
     prober_run_phase(1, (uint32_t)test_pps, test_duration_sec, single);
     rep.have_up = true;
     memset(&rep.up, 0, sizeof(rep.up));
-    rep.up.stats    = g_pr.result_stats;
-    rep.up.balanced = g_pr.result_tier;
-    double hdr_factor = 1.0 + 16.0 / (double)test_pkt_size;
-    if (rep.up.balanced.feasible)
-        rep.up.balanced.actual_mbps =
-            rep.app_mbps * (1.0 + rep.up.balanced.overhead) * hdr_factor;
+    rep.up.stats      = g_pr.result_stats;
+    rep.up.thrifty    = g_pr.result_tiers[0];
+    rep.up.balanced   = g_pr.result_tiers[1];
+    rep.up.aggressive = g_pr.result_tiers[2];
 
     // ---- S3: N ports, upstream (only when --data-port-range was given) ----
     if (!spread.empty()) {
