@@ -353,16 +353,25 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
         }
     }
 
-    // PHASE_END x3 (it can be lost too, and there is no ACK for it).
+    // Grace period to drain in-flight probes before the responder finalizes.
+    // The responder finalizes the instant PHASE_END arrives, so this sleep
+    // must happen BEFORE PHASE_END is sent, not after: probes and PHASE_END
+    // travel on different sockets (data ports vs. the control address), so
+    // there is no cross-socket ordering guarantee that the last probe is
+    // dequeued before PHASE_END lands, especially with multiple data ports
+    // (S3) or over a real link where probes are still genuinely in flight
+    // for ~RTT. Sleeping here first, then sending PHASE_END, ensures the
+    // probes have actually landed before the responder stops counting.
+    my_time_t grace_us = g_pr.rtt_us * 2;
+    if (grace_us < 500000ULL) grace_us = 500000ULL;
+    usleep((useconds_t)grace_us);
+
+    // PHASE_END x3 (it can be lost too, and there is no ACK for it). The
+    // REQUEST_RESULT retry loop below covers a lost RESULT reply.
     for (int k = 0; k < 3; k++) {
         prober_sendto(TEST_PHASE_END, phase, 0, NULL, 0, g_pr.peer, 0);
         usleep(20 * 1000);
     }
-
-    // Grace period before asking for the result, so in-flight probes land.
-    my_time_t grace_us = g_pr.rtt_us * 2;
-    if (grace_us < 500000ULL) grace_us = 500000ULL;
-    usleep((useconds_t)grace_us);
 
     uint8_t wire[TEST_RESULT_WIRE_LEN];
     int wire_len = (int)sizeof(wire);
