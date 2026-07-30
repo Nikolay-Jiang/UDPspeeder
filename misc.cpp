@@ -6,6 +6,8 @@
  */
 
 #include "misc.h"
+#include "control_proto.h"
+#include "test_mode.h"
 
 char fifo_file[1000] = "";
 
@@ -39,6 +41,7 @@ fd_manager_t fd_manager;
 int time_mono_test = 0;
 
 int delay_capacity = 0;
+int io_batch_size = 32;
 
 char sub_net[100] = "10.22.22.0";
 u32_t sub_net_uint32 = 0;
@@ -47,7 +50,26 @@ char tun_dev[100] = "";
 
 int keep_reconnect = 0;
 
+// port-range mode globals
+int port_range_mode = 0;
+int ctrl_port = 0;
+int ctrl_mac_mode = 0;  // CTRL_MAC_LEGACY
+int nat_keepalive_sec = 30;
+int hello_retry_max_sec = 30;
+int heartbeat_interval_sec = 5;
+int heartbeat_loss_threshold = 3;
+address_t ctrl_addr;
+char data_port_range_str[64] = "";
+port_range_manager_t port_range_mgr;
+
 int tun_mtu = 1500;
+
+// test-mode globals
+int    test_mode = 0;
+int    test_duration_sec = 30;
+int    test_pps = 200;
+int    test_pkt_size = 1200;
+double test_app_mbps = 0.0;  // 0 => derive from probe rate
 
 int mssfix = default_mtu;
 
@@ -582,6 +604,21 @@ void process_arg(int argc, char *argv[]) {
             {"persist-tun", no_argument, 0, 1},
             {"manual-set-tun", no_argument, 0, 1},
             {"interval", required_argument, 0, 'i'},
+            {"io-batch", required_argument, 0, 1},
+            {"port-range-mode", no_argument, 0, 1},
+            {"control-port", required_argument, 0, 1},
+            {"data-port-range", required_argument, 0, 1},
+            {"control-host", required_argument, 0, 1},
+            {"control-mac", required_argument, 0, 1},
+            {"nat-keepalive", required_argument, 0, 1},
+            {"hello-retry-max", required_argument, 0, 1},
+            {"heartbeat-interval", required_argument, 0, 1},
+            {"heartbeat-loss-threshold", required_argument, 0, 1},
+            {"test-mode", no_argument, 0, 1},
+            {"test-duration", required_argument, 0, 1},
+            {"test-pps", required_argument, 0, 1},
+            {"test-pkt-size", required_argument, 0, 1},
+            {"test-app-mbps", required_argument, 0, 1},
             {NULL, 0, 0, 0}};
     int option_index = 0;
     assert(g_fec_par.rs_from_str(rs_par_str) == 0);
@@ -590,6 +627,9 @@ void process_arg(int argc, char *argv[]) {
         if (strcmp(argv[i], "--unit-test") == 0) {
             unit_test();
             myexit(0);
+        }
+        if (strcmp(argv[i], "--test-selftest") == 0) {
+            myexit(test_mode_selftest());
         }
     }
 
@@ -744,6 +784,93 @@ void process_arg(int argc, char *argv[]) {
                         myexit(-1);
                     }
                     mylog(log_info, "random_drop=%d\n", random_drop);
+                } else if (strcmp(long_options[option_index].name, "io-batch") == 0) {
+                    sscanf(optarg, "%d", &io_batch_size);
+                    if (io_batch_size < 1 || io_batch_size > IO_BATCH_MAX) {
+                        mylog(log_fatal, "io-batch must be between 1 and %d\n", IO_BATCH_MAX);
+                        myexit(-1);
+                    }
+                    mylog(log_info, "io_batch_size=%d\n", io_batch_size);
+                } else if (strcmp(long_options[option_index].name, "port-range-mode") == 0) {
+                    port_range_mode = 1;
+                    mylog(log_info, "port_range_mode enabled\n");
+                } else if (strcmp(long_options[option_index].name, "control-port") == 0) {
+                    sscanf(optarg, "%d", &ctrl_port);
+                    if (ctrl_port < 1 || ctrl_port > 65535) {
+                        mylog(log_fatal, "--control-port must be 1-65535\n");
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "data-port-range") == 0) {
+                    snprintf(data_port_range_str, sizeof(data_port_range_str), "%s", optarg);
+                } else if (strcmp(long_options[option_index].name, "control-host") == 0) {
+                    char tmp[256];
+                    snprintf(tmp, sizeof(tmp), "%s", optarg);
+                    if (ctrl_addr.from_str(tmp) != 0) {
+                        mylog(log_fatal, "--control-host: invalid address '%s'\n", optarg);
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "control-mac") == 0) {
+                    if (strcmp(optarg, "legacy") == 0) {
+                        ctrl_mac_mode = CTRL_MAC_LEGACY;
+                    } else if (strcmp(optarg, "siphash") == 0) {
+                        ctrl_mac_mode = CTRL_MAC_SIPHASH;
+                    } else {
+                        mylog(log_fatal, "--control-mac must be 'legacy' or 'siphash'\n");
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "nat-keepalive") == 0) {
+                    sscanf(optarg, "%d", &nat_keepalive_sec);
+                    if (nat_keepalive_sec < 1) {
+                        mylog(log_fatal, "--nat-keepalive must be >= 1\n");
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "hello-retry-max") == 0) {
+                    sscanf(optarg, "%d", &hello_retry_max_sec);
+                    if (hello_retry_max_sec < 1) {
+                        mylog(log_fatal, "--hello-retry-max must be >= 1\n");
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "heartbeat-interval") == 0) {
+                    sscanf(optarg, "%d", &heartbeat_interval_sec);
+                    if (heartbeat_interval_sec < 1) {
+                        mylog(log_fatal, "--heartbeat-interval must be >= 1\n");
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "heartbeat-loss-threshold") == 0) {
+                    sscanf(optarg, "%d", &heartbeat_loss_threshold);
+                    if (heartbeat_loss_threshold < 1) {
+                        mylog(log_fatal, "--heartbeat-loss-threshold must be >= 1\n");
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "test-mode") == 0) {
+                    test_mode = 1;
+                    working_mode = test_working_mode;
+                    mylog(log_info, "test_mode enabled\n");
+                } else if (strcmp(long_options[option_index].name, "test-duration") == 0) {
+                    sscanf(optarg, "%d", &test_duration_sec);
+                    if (test_duration_sec < 1 || test_duration_sec > TEST_DURATION_MAX) {
+                        mylog(log_fatal, "--test-duration must be 1-%d\n", TEST_DURATION_MAX);
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "test-pps") == 0) {
+                    sscanf(optarg, "%d", &test_pps);
+                    if (test_pps < 1 || test_pps > TEST_PPS_MAX) {
+                        mylog(log_fatal, "--test-pps must be 1-%d\n", TEST_PPS_MAX);
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "test-pkt-size") == 0) {
+                    sscanf(optarg, "%d", &test_pkt_size);
+                    if (test_pkt_size < TEST_PKT_SIZE_MIN || test_pkt_size > TEST_PKT_SIZE_MAX) {
+                        mylog(log_fatal, "--test-pkt-size must be %d-%d\n",
+                              TEST_PKT_SIZE_MIN, TEST_PKT_SIZE_MAX);
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "test-app-mbps") == 0) {
+                    sscanf(optarg, "%lf", &test_app_mbps);
+                    if (test_app_mbps < 0.0) {
+                        mylog(log_fatal, "--test-app-mbps must be >= 0\n");
+                        myexit(-1);
+                    }
                 } else if (strcmp(long_options[option_index].name, "delay-capacity") == 0) {
                     sscanf(optarg, "%d", &delay_capacity);
 
@@ -868,11 +995,13 @@ void process_arg(int argc, char *argv[]) {
     }
 
     if (working_mode == tunnel_mode) {
-        if (no_l)
+        bool need_l = !(port_range_mode && program_mode == server_mode);
+        bool need_r = !(port_range_mode && program_mode == client_mode);
+        if (need_l && no_l)
             mylog(log_fatal, "error: -l not found\n");
-        if (no_r)
+        if (need_r && no_r)
             mylog(log_fatal, "error: -r not found\n");
-        if (no_l || no_r)
+        if ((need_l && no_l) || (need_r && no_r))
             myexit(-1);
     } else if (working_mode == tun_dev_mode) {
         if (program_mode == client_mode && no_r) {
@@ -884,10 +1013,89 @@ void process_arg(int argc, char *argv[]) {
         }
     }
 
+    if (working_mode == test_working_mode) {
+        if (strlen(key_string) == 0) {
+            mylog(log_fatal, "--test-mode requires -k (mandatory: probes are MAC-authenticated "
+                             "to prevent this responder being used as a UDP reflector)\n");
+            myexit(-1);
+        }
+        if (program_mode == client_mode && !remote_addr.is_vaild()) {
+            mylog(log_fatal, "--test-mode client requires -r <responder_ip:port>\n");
+            myexit(-1);
+        }
+        if (program_mode == server_mode && !local_addr.is_vaild()) {
+            mylog(log_fatal, "--test-mode server requires -l <listen_ip:port>\n");
+            myexit(-1);
+        }
+        // Guard the probe count per phase, not just its two factors: the
+        // responder blocks its entire ev loop while evaluating a phase, and a
+        // combination well inside the documented per-option ranges could push
+        // that past the prober's result-collection budget and kill the run.
+        // The product overflows int at the documented maxima (20000 x 600), so
+        // it is computed in 64 bits.
+        long long probes_main = (long long)test_pps * (long long)test_duration_sec;
+        long long probes_scan = (long long)test_pps * 2LL * (long long)TEST_RATE_SCAN_SEC;
+        long long probes_max  = probes_main > probes_scan ? probes_main : probes_scan;
+        if (probes_max > TEST_MAX_TOTAL_PROBES) {
+            mylog(log_fatal,
+                  "--test-pps %d x --test-duration %d = %lld probes per phase, "
+                  "which exceeds the limit of %lld.\n"
+                  "       (the rate-scan phase probes at 2x --test-pps for %d s, "
+                  "i.e. %lld probes, and is capped by the same limit.)\n"
+                  "       reduce --test-pps or --test-duration. %lld samples already "
+                  "resolve loss down to %.4f%%, far finer than the 0.01%% target of "
+                  "the tightest recommendation tier.\n",
+                  test_pps, test_duration_sec, probes_main,
+                  TEST_MAX_TOTAL_PROBES, TEST_RATE_SCAN_SEC, probes_scan,
+                  TEST_MAX_TOTAL_PROBES, 100.0 / (double)TEST_MAX_TOTAL_PROBES);
+            myexit(-1);
+        }
+
+        // Applies to both roles: the responder binds one socket per parsed
+        // port, and the prober (Task 9) needs the same parsed list for its
+        // multi-port comparison phase. Without this, --data-port-range would
+        // set the string but leave port_range_mgr empty in test mode.
+        if (data_port_range_str[0] != 0) {
+            if (port_range_mgr.parse_range(data_port_range_str) != 0)
+                myexit(-1);
+            mylog(log_info, "--test-mode: data-port-range=%s (%d ports)\n",
+                  data_port_range_str, port_range_mgr.count());
+        }
+    }
+
     int ret = g_fec_par.rs_from_str(rs_par_str);
     if (ret != 0) {
         mylog(log_fatal, "failed to parse [%s]\n", rs_par_str);
         myexit(-1);
+    }
+
+    // port-range-mode validation
+    if (port_range_mode) {
+        if (program_mode == server_mode) {
+            if (ctrl_port == 0) {
+                mylog(log_fatal, "--port-range-mode requires --control-port on server\n");
+                myexit(-1);
+            }
+            if (data_port_range_str[0] == 0) {
+                mylog(log_fatal, "--port-range-mode requires --data-port-range on server\n");
+                myexit(-1);
+            }
+            if (port_range_mgr.parse_range(data_port_range_str) != 0)
+                myexit(-1);
+            mylog(log_info, "port-range-mode: control-port=%d data-ports=%s (%d ports)\n",
+                  ctrl_port, data_port_range_str, port_range_mgr.count());
+        } else {
+            if (ctrl_addr.get_port() == 0) {
+                mylog(log_fatal, "--port-range-mode requires --control-host on client\n");
+                myexit(-1);
+            }
+            mylog(log_info, "port-range-mode: control-host=%s\n", ctrl_addr.get_str());
+        }
+        ctrl_nonce_init();
+        if (ctrl_mac_mode == CTRL_MAC_SIPHASH)
+            mylog(log_info, "control-mac: siphash\n");
+        else
+            mylog(log_info, "control-mac: legacy\n");
     }
 
     print_parameter();

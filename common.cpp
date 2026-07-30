@@ -384,11 +384,13 @@ u32_t read_u32(char *p) {
 }
 
 void write_u64(char *s, u64_t a) {
-    assert(0 == 1);
+    write_u32(s, get_u64_h(a));
+    write_u32(s + 4, get_u64_l(a));
 }
-u64_t read_u64(char *s) {
-    assert(0 == 1);
-    return 0;
+u64_t read_uu64(char *s) {
+    u32_t h = read_u32(s);
+    u32_t l = read_u32(s + 4);
+    return pack_u64(h, l);
 }
 
 char *my_ntoa(u32_t ip) {

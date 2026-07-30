@@ -24,6 +24,10 @@ extern int random_drop;
 extern int disable_obscure;
 extern int disable_xor;
 
+static const int IO_BATCH_MAX = 64;
+void my_send_batch_begin();
+void my_send_flush();
+
 int my_send(const dest_t &dest, char *data, int len);
 
 void encrypt_0(char *input, int &len, char *key);

@@ -9,6 +9,7 @@
 #include "fec_manager.h"
 #include "misc.h"
 #include "tunnel.h"
+#include "test_mode.h"
 //#include "tun_dev.h"
 #include "git_version.h"
 using namespace std;
@@ -68,6 +69,48 @@ static void print_help() {
 #ifdef __linux__
     printf("    --out-interface       <string>        force all output packets of '-r' end to go through this interface.\n");
 #endif
+    printf("port-range mode options (spread the tunnel across N udp ports to defeat per-flow isp rate limiting):\n");
+    printf("    --port-range-mode                     enable port-range mode. must be set on both sides. off by default.\n");
+    printf("    --control-port        <port>          (server) fixed control/handshake port.\n");
+    printf("    --data-port-range     a-b             (server) inclusive range of data ports, 1..256 ports.\n");
+    printf("    --control-host        ip:port         (client) server's control address to handshake with.\n");
+    printf("    --control-mac         legacy|siphash   control-plane mac. must match on both sides. default: legacy.\n");
+    printf("    --nat-keepalive       <sec>           (server) nat endpoint keepalive, default: 30.\n");
+    printf("    --hello-retry-max     <sec>           (client) max handshake retry backoff, default: 30.\n");
+    printf("    --heartbeat-interval  <sec>           control-plane heartbeat interval, default: 5.\n");
+    printf("    --heartbeat-loss-threshold <n>        missed heartbeats before re-handshake, default: 3.\n");
+    printf("      NOTE: in port-range mode the server identifies a client by source ip only (the source port\n");
+    printf("            is ignored), so clients behind a symmetric nat work. the trade-off is that only ONE\n");
+    printf("            client per public ip is supported -- two clients sharing an ip collapse into one\n");
+    printf("            session. use a separate ip, or a separate server instance, for each client.\n");
+
+    printf("test mode options (measure the link and recommend fec parameters):\n");
+    printf("    --test-mode                           run a one-shot link measurement instead of a tunnel, then exit.\n");
+    printf("                                          must be set on both sides. -k is mandatory: probes are mac-authenticated,\n");
+    printf("                                          so an open responder cant be driven by an unauthenticated peer.\n");
+    printf("                                          responder: -s --test-mode -l <ip:port>\n");
+    printf("                                          prober:    -c --test-mode -r <ip:port>  (prints the report)\n");
+    printf("    --test-duration       <sec>           per-phase probe duration, default: 30, max: 600.\n");
+    printf("    --test-pps            <number>        probe packet rate, default: 200, max: 20000.\n");
+    printf("    --test-pkt-size       <number>        probe packet size, default: 1200, min: 64, max: 1400.\n");
+    printf("    --test-app-mbps       <number>        your real payload rate, used to convert redundancy overhead into\n");
+    printf("                                          absolute bandwidth. default: the probe rate itself.\n");
+    printf("    --test-selftest                       run the evaluators built-in self-checks against synthetic traces\n");
+    printf("                                          and exit; no network involved.\n");
+    printf("    --data-port-range     a-b             optional, same flag as above: when set on both sides, also probes\n");
+    printf("                                          upstream traffic spread across the n ports and reports whether\n");
+    printf("                                          port-range mode would reduce loss on this link. it must be\n");
+    printf("                                          identical on both ends (or absent from both); a mismatch is\n");
+    printf("                                          detected during the handshake and the session is refused.\n");
+    printf("      NOTE: --test-pps x --test-duration must not exceed 500000 probes per phase; the\n");
+    printf("            combination is validated at startup.\n");
+    printf("      NOTE: only the client -> server direction is measured; the report has no\n");
+    printf("            server -> client section. total runtime is the fixed 30s rate scan plus one\n");
+    printf("            --test-duration pass, plus a second --test-duration pass if --data-port-range\n");
+    printf("            is set (about 30s + 2x --test-duration then). residual loss is a conservative\n");
+    printf("            replay estimate computed with -i excluded, so the real result after applying\n");
+    printf("            the recommended -i should be better than shown.\n");
+
     printf("log and help options:\n");
     printf("    --log-level           <number>        0: never    1: fatal   2: error   3: warn \n");
     printf("                                          4: info (default)      5: debug   6: trace\n");
@@ -138,7 +181,13 @@ int main(int argc, char *argv[]) {
         sprintf(tun_dev, "tun%u", get_fake_random_number() % 1000);
     }
 
-    if (program_mode == client_mode) {
+    if (working_mode == test_working_mode) {
+        if (program_mode == client_mode) {
+            test_mode_prober_loop();
+        } else {
+            test_mode_responder_loop();
+        }
+    } else if (program_mode == client_mode) {
         tunnel_client_event_loop();
     } else {
         tunnel_server_event_loop();

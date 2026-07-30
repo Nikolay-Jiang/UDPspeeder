@@ -103,11 +103,49 @@ struct my_timer_t
         }
 };*/
 
+// Fixed-size object pool for delay_manager packet buffers.
+// Eliminates per-packet malloc/free in the hot send path.
+struct packet_pool_t {
+    static const int SLOT_SIZE = buf_len + 100;
+    static const int NUM_SLOTS = 800;
+
+    char *mem;
+    vector<char *> free_slots;
+
+    packet_pool_t() {
+        mem = new char[NUM_SLOTS * SLOT_SIZE];
+        free_slots.reserve(NUM_SLOTS);
+        for (int i = 0; i < NUM_SLOTS; i++)
+            free_slots.push_back(mem + i * SLOT_SIZE);
+    }
+    ~packet_pool_t() { delete[] mem; }
+
+    char *acquire() {
+        if (!free_slots.empty()) {
+            char *p = free_slots.back();
+            free_slots.pop_back();
+            return p;
+        }
+        return (char *)malloc(SLOT_SIZE);  // fallback, logged by caller
+    }
+
+    // pooled=true means p came from acquire(), false means it's a fallback malloc
+    void release(char *p, bool pooled) {
+        if (pooled)
+            free_slots.push_back(p);
+        else
+            free(p);
+    }
+
+    bool is_full() const { return free_slots.empty(); }
+};
+
 struct delay_data_t {
     dest_t dest;
     // int left_time;//
     char *data;
     int len;
+    bool pooled;  // true: data is from packet_pool_t, false: fallback malloc
     int handle();
 };
 
@@ -118,6 +156,7 @@ struct delay_manager_t {
 
     // int timer_fd;
     int capacity;
+    packet_pool_t pool;
     multimap<my_time_t, delay_data_t> delay_mp;  // unit us,1 us=0.001ms
     delay_manager_t();
     delay_manager_t(delay_manager_t &b) {

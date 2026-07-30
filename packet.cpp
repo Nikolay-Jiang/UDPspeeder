@@ -10,6 +10,7 @@
 #include "packet.h"
 #include "misc.h"
 #include "crc32/Crc32.h"
+#include <algorithm>
 
 int iv_min = 4;
 int iv_max = 32;  //< 256;
@@ -27,6 +28,76 @@ int disable_xor = 0;
 int random_drop = 0;
 
 char key_string[1000] = "";
+
+struct send_batch_entry_t {
+    char buf[buf_len];
+    int len;
+    int fd;
+    address_t addr;
+};
+
+static send_batch_entry_t s_send_batch[IO_BATCH_MAX];
+static int s_send_n = 0;
+static bool s_batching = false;
+
+void my_send_batch_begin() {
+    s_send_n = 0;
+    s_batching = true;
+}
+
+void my_send_flush() {
+    static struct mmsghdr msgvec[IO_BATCH_MAX];
+    static struct iovec iov[IO_BATCH_MAX];
+    static int idx[IO_BATCH_MAX];
+
+    // Sort by fd so same-fd entries are contiguous → one sendmmsg call per fd.
+    // Must be stable: same-fd packets (e.g. a whole FEC group) have to keep their
+    // original order, otherwise std::sort can near-reverse them and reorder the wire.
+    for (int k = 0; k < s_send_n; k++) idx[k] = k;
+    std::stable_sort(idx, idx + s_send_n, [](int a, int b) {
+        return s_send_batch[a].fd < s_send_batch[b].fd;
+    });
+
+    int i = 0;
+    while (i < s_send_n) {
+        int fd = s_send_batch[idx[i]].fd;
+        int count = 0;
+        int j = i;
+        while (j < s_send_n && s_send_batch[idx[j]].fd == fd) {
+            send_batch_entry_t &e = s_send_batch[idx[j]];
+            iov[count].iov_base = e.buf;
+            iov[count].iov_len = e.len;
+            memset(&msgvec[count], 0, sizeof(msgvec[count]));
+            msgvec[count].msg_hdr.msg_iov = &iov[count];
+            msgvec[count].msg_hdr.msg_iovlen = 1;
+            msgvec[count].msg_hdr.msg_name = (void *)&e.addr.inner;
+            msgvec[count].msg_hdr.msg_namelen = e.addr.get_len();
+            count++;
+            j++;
+        }
+        int sent = sendmmsg(fd, msgvec, count, 0);
+        if (sent < 0) {
+            static my_time_t last_err_log = 0;
+            my_time_t now = get_current_time();
+            if (now - last_err_log > 1000) {  // rate-limit to 1/s
+                last_err_log = now;
+                mylog(log_warn, "sendmmsg(fd=%d,count=%d) failed: %s\n", fd, count, get_sock_error());
+            }
+        } else if (sent < count) {
+            static my_time_t last_short_log = 0;
+            my_time_t now = get_current_time();
+            if (now - last_short_log > 1000) {  // rate-limit to 1/s
+                last_short_log = now;
+                mylog(log_warn, "sendmmsg(fd=%d) short send: %d/%d, %d packets dropped\n", fd, sent, count, count - sent);
+            }
+        }
+        i = j;
+    }
+
+    s_send_n = 0;
+    s_batching = false;
+}
+
 
 // int local_listen_fd=-1;
 
@@ -115,6 +186,41 @@ int send_fd(int fd, char *buf, int len, int flags) {
 int my_send(const dest_t &dest, char *data, int len) {
     if (dest.cook) {
         do_cook(data, len);
+    }
+    if (s_batching && s_send_n == IO_BATCH_MAX) {
+        // Batch full: flush it before handling this packet so it stays behind the
+        // already-buffered ones. Otherwise it would fall through to an immediate
+        // sendto and overtake the still-buffered batch, reordering the wire.
+        my_send_flush();
+        my_send_batch_begin();
+    }
+    if (s_batching && s_send_n < IO_BATCH_MAX) {
+        int fd = -1;
+        address_t addr;
+        bool batchable = false;
+        switch (dest.type) {
+            case type_fd_addr:
+                fd = dest.inner.fd_addr.fd;
+                addr = dest.inner.fd_addr.addr;
+                batchable = true;
+                break;
+            case type_fd64_addr:
+                if (!fd_manager.exist(dest.inner.fd64)) return -1;
+                fd = fd_manager.to_fd(dest.inner.fd64);
+                addr = dest.inner.fd64_addr.addr;
+                batchable = true;
+                break;
+            default:
+                break;
+        }
+        if (batchable) {
+            send_batch_entry_t &e = s_send_batch[s_send_n++];
+            memcpy(e.buf, data, len);
+            e.len = len;
+            e.fd = fd;
+            e.addr = addr;
+            return 0;
+        }
     }
     switch (dest.type) {
         case type_fd_addr: {

@@ -27,7 +27,7 @@ tested on a link with 100ms latency and 10% packet loss at both direction
 ![](/images/en/scp_compare2.PNG)
 
 # Supported Platforms
-Linux only: desktop Linux, Android (Termux), OpenWRT router, Raspberry Pi.
+Linux x86 / x86_64 only.
 
 # How does it work
 
@@ -64,14 +64,11 @@ make debug    # debug build with MY_DEBUG defined, no -O2
 make fast     # optimized build with debug symbols
 ```
 
-Cross-compile targets for OpenWRT/embedded (toolchain paths must be set in `makefile`):
+Static cross-compile targets using the bundled OpenWRT x86 musl toolchains (toolchain paths must be set in `makefile`):
 
 ```bash
 make amd64
-make arm
 make x86
-make mips24kc_be
-make mips24kc_le
 ```
 
 ### Running (improves UDP traffic only)
@@ -99,6 +96,189 @@ Now connecting to UDP port 3333 at the client side is equivalent to connecting t
 See [UDPspeeder + openvpn config guide](https://github.com/wangyu-/UDPspeeder/wiki/UDPspeeder-openvpn-config-guide).
 
 # Advanced Topic
+
+### Port-Range Mode (Defeat Per-Flow ISP Rate Limiting)
+
+**Note:** This feature is optional and disabled by default.
+
+#### Motivation
+
+Some ISPs implement per-5-tuple flow-level rate limiting or QoS: a single UDP 5-tuple (source IP, source port, dest IP, dest port, protocol) is throttled to a lower bandwidth. UDPspeeder's default mode uses a single UDP socket, concentrating all tunnel traffic onto one 5-tuple—allowing the ISP to apply the per-flow limit to the entire tunnel.
+
+**Port-range mode** spreads tunnel traffic across N different UDP ports on the server and client, creating N distinct 5-tuples. ISP per-flow limits are now applied per-port, so the total tunnel capacity is multiplied by N.
+
+#### How It Works
+
+- **Server:** Binds to a fixed **control port** + a range of **data ports** (up to 256).
+- **Client:** Establishes a handshake on the control port, learns the list of available data ports, then round-robin distributes all outbound packets across the N data ports.
+- **NAT traversal:** The server tracks the NAT endpoint (source port + which data fd received the packet) for each client and uses those to reverse-route packets back through the correct data fd—compatible with symmetric NAT.
+
+Data packets still use the same on-wire format (obscure, XOR, FEC, etc.); only the socket routing changes. Session management is kept lightweight: a separate control-plane protocol carries the handshake and keepalive, while data packets flow over data ports unchanged.
+
+#### Limitations
+
+**Only one client per public IP address.** The data plane carries no session id, so in port-range mode the server identifies a client by its source **IP only**, ignoring the source port. Two distinct clients sharing one public IP would therefore collapse into a single connection — mixing their FEC sequence streams into one decoder and their NAT endpoints into one reply set. Give each client its own public IP, or run separate server instances on separate control ports.
+
+Ignoring the source port is what makes **symmetric NAT** work. A symmetric NAT assigns a *different* external source port per destination port, so a client sending to N data ports arrives from N different source addresses. Keying on `(ip, port)` would split that one logical client into N separate connections — fragmenting its FEC groups across N decoders and opening N sockets to the `-r` target, which breaks stateful applications (a TLS handshake would see N apparent clients and never converge). Keying on the IP alone collapses those back into one session; the true per-port source address is tracked separately and used for replies, so return traffic still follows each NAT mapping correctly.
+
+Public clients, cone NATs (full-cone / restricted-cone / port-restricted-cone), and symmetric / carrier-grade NATs are therefore all supported. Session-id-based data-plane routing, which would also lift the one-client-per-IP restriction, is planned for a future revision.
+
+#### Example
+
+Enable port-range mode with 16 data ports:
+
+```bash
+# Server: listen on control port 14096 and data ports 15000–15015
+./speederv2 -s \
+    --port-range-mode \
+    --control-port 14096 \
+    --data-port-range 15000-15015 \
+    -r 127.0.0.1:7777 \
+    -f20:10 -k "passwd"
+
+# Client: dial control port 14096, get data port list, tunnel via those ports
+./speederv2 -c \
+    --port-range-mode \
+    --control-host 44.55.66.77:14096 \
+    -l 0.0.0.0:3333 \
+    -f20:10 -k "passwd"
+```
+
+Client and server **must both specify `--port-range-mode`**; there is no automatic fallback. If only one side enables it, the handshake will fail.
+
+#### Verification
+
+To verify that traffic is spreading across ports, capture a sample on loopback:
+
+```bash
+sudo tcpdump -i lo udp port range 15000-15015 -c 100 | awk '{print $NF}' | sort | uniq -c
+```
+
+You should see packets distributed across multiple destination ports in the range.
+
+#### Control-Plane Protocol
+
+The control plane uses an independent packet structure (version, msg_type, nonce, timestamp, payload, MAC). 
+
+- **MAC algorithms:** `legacy` (default; uses existing `do_obscure` + `encrypt_0`) or `siphash` (SipHash-2-4 HMAC).
+- **Messages:** `HELLO` (client → server), `HELLO_ACK` (server → client, carries session_id and port list), `HEARTBEAT` + `HEARTBEAT_ACK` (keepalive), `BYE` (teardown).
+- **Anti-replay:** Sliding window ±60s on timestamp, 1024-entry LRU nonce cache per session.
+
+Use `--control-mac {legacy|siphash}` to choose the MAC algorithm (both sides must match). Defaults to `legacy` for zero additional overhead.
+
+### Test Mode (Measure the Link, Recommend FEC Parameters)
+
+**Note:** This feature is optional. It turns the program into a one-shot link
+prober instead of a tunnel, then exits.
+
+#### What it does
+
+`--test-mode` measures real upstream (client → server) packet loss on the
+link and recommends `-f x:y -i n` settings from what it measured, instead of
+you guessing. Currently only the client → server direction is measured; the
+report has no server → client section (a future revision may add it).
+
+- **Responder** (far end, just answers probes): `-s --test-mode -l <ip:port>`
+- **Prober** (drives the measurement, prints the report): `-c --test-mode -r <ip:port>`
+- `-k` is **mandatory** on both sides: probes are MAC-authenticated, so an
+  open responder cannot be driven by an unauthenticated party (e.g. used as a
+  UDP reflector).
+
+#### How to run it
+
+```bash
+# responder (far end)
+./speederv2 -s --test-mode -l0.0.0.0:4096 -k "passwd"
+
+# prober (drives the test, prints the report)
+./speederv2 -c --test-mode -r<server_ip>:4096 -k "passwd" \
+    --test-duration 30 --test-pps 200 --test-pkt-size 1200 --test-app-mbps 5
+```
+
+Add `--data-port-range a-b` on **both** sides to also compare single-port vs.
+N-port upstream loss. It is the same flag documented under
+[Port-Range Mode](#port-range-mode-defeat-per-flow-isp-rate-limiting) above;
+`--port-range-mode` itself is not required in test mode.
+
+The range must be **identical on both ends, or absent from both**. The
+handshake compares them and the responder refuses the session with an
+explicit reason if they disagree — otherwise the multi-port probes would land
+on ports nobody is bound to and the report would confidently conclude that
+port-range brings no benefit, which is the opposite of what such a run shows.
+
+`--test-pps × --test-duration` must not exceed **500,000 probes per phase**;
+the combination is checked at startup. The responder evaluates a phase
+synchronously, and larger traces push that past the prober's
+result-collection timeout. 500,000 samples already resolve loss to 0.0002%,
+far finer than the tightest recommendation tier needs.
+
+| Option | Default | Range | Meaning |
+|---|---|---|---|
+| `--test-duration <sec>` | 30 | 1–600 | duration of each full-length measurement pass |
+| `--test-pps <number>` | 200 | 1–20000 | probe packet rate |
+| `--test-pkt-size <number>` | 1200 | 64–1400 | probe packet size |
+| `--test-app-mbps <number>` | probe rate | — | your real payload rate; used only to convert redundancy overhead into an absolute Mbps figure |
+| `--test-selftest` | — | — | run the evaluator's self-checks against synthetic traces and exit; touches no network |
+
+Total runtime is the fixed 30-second rate scan (3 × 10s, independent of
+`--test-duration`) plus one `--test-duration` pass, plus a second
+`--test-duration` pass if `--data-port-range` is set. With the defaults
+that's roughly 1 minute for a single-port run, or about 1.5 minutes with
+`--data-port-range`; even a minimal run (`--test-duration 1`) takes about 30
+seconds, because of the fixed scan.
+
+#### Reading the report
+
+The report currently prints its section headings and labels in Chinese (for
+example the three tiers are named 省流 / 均衡 / 激进 — thrifty / balanced /
+aggressive). This section explains its content and structure in English so
+the numbers can be interpreted regardless of the label language.
+
+The report contains, in order:
+
+1. **Loss-nature verdict.** The rate scan runs the probe at 0.5×, 1× and 2×
+   the nominal `--test-pps`. If loss rises significantly with rate, the loss
+   is policing- or congestion-induced: FEC will not help there, and adding
+   redundancy makes it *worse*, because the extra packets consume more of the
+   throttled capacity. The report says so explicitly instead of recommending
+   more redundancy — the right remedy for that case is spreading traffic
+   (`--data-port-range`), not a bigger `-f`.
+2. **Link characteristics** for the client → server direction: loss rate,
+   loss run-length p50/p95/max, p95 burst duration, and this run's sampling
+   resolution (`1/n`).
+3. **Three candidate configs** — thrifty (residual loss ≤1%), balanced
+   (≤0.1%, the default recommendation), aggressive (≤0.01%) — each with
+   predicted residual loss, redundancy overhead and absolute bandwidth. A
+   tier whose target is below this run's sampling resolution is marked as
+   extrapolated; a target no candidate can reach is reported as unreachable
+   rather than a fabricated number.
+4. **Port-range comparison**, only when `--data-port-range` was given:
+   single-port vs. N-port upstream loss, and whether port-range mode would
+   help on this link.
+5. **A suggested command line** for the balanced tier.
+
+#### How the recommendation is derived
+
+One probe pass records a timestamped loss trace (arrived/lost per sequence
+number). That trace is then replayed against roughly 1500 candidate `x:y`
+pairs. Because Reed-Solomon is a maximum-distance-separable (MDS) code, a
+group of `x` data shards plus `y` redundant shards recovers if and only if at
+least `x` of the `x+y` shards arrive — so residual loss is simply the
+fraction of `(x+y)`-wide sliding windows in the trace containing more than
+`y` losses. This makes no assumption about the loss distribution, which
+matters because bursty loss badly breaks the binomial models a purely
+analytical (non-replay) estimate would need.
+
+`-i` is derived from the trace's measured p95 burst duration
+(`i >= burst_p95_ms * (x+y)/y`, capped at 50ms), but is deliberately
+**excluded** from the residual-loss figure above, because scattering changes
+send timing and the trace was captured unscattered. Recommendations are
+therefore conservative: the real result after applying the recommended `-i`
+should be better than shown, never worse.
+
+Run `--test-selftest` to verify the evaluator's replay logic against
+synthetic traces (isolated loss, bursty loss, total loss, etc.) without
+touching the network.
 
 ### Full Options
 ```
@@ -143,6 +323,7 @@ developer options:
     --delay-capacity      <number>        max number of delayed packets
     --disable-fec         <number>        completely disable fec, turn the program into a normal udp tunnel
     --sock-buf            <number>        buf size for socket, >=10 and <=10240, unit: kbyte, default: 1024
+    --io-batch            <number>        batch size for recvmmsg/sendmmsg, 1..64, default: 32. set to 1 to disable batching.
 log and help options:
     --log-level           <number>        0: never    1: fatal   2: error   3: warn 
                                           4: info (default)      5: debug   6: trace
@@ -161,6 +342,17 @@ echo queue-len 100 > fifo.file
 echo mode 0 > fifo.file
 ```
 
+
+# Recent Changes (branch_libev)
+
+Recent performance and maintenance work on `branch_libev`:
+
+- **Linux x86/x86_64 only.** Windows, macOS, ARM and MIPS build paths were removed; the tree now targets Linux x86 / x86_64 only, simplifying the source and the makefile.
+- **Zero-malloc hot path in `delay_manager`.** Per-packet `malloc`/`free` on the outbound delay/jitter path was replaced with a pre-allocated object pool (`packet_pool_t`, LIFO free list, ~800 slots). Falls back to `malloc` with a warning only if the pool is exhausted.
+- **Batch I/O via `recvmmsg` / `sendmmsg`.** Both the client remote callback and the server local-listen callback now drain up to `--io-batch` packets per libev wakeup with a single `recvmmsg` syscall. Outbound packets produced while decoding a batch are coalesced and flushed with `sendmmsg`, grouped by fd. At 32-packet batches this cuts receive/send syscall counts by roughly 32×, materially lowering CPU at high pps. New `--io-batch N` CLI option (1..64, default 32; set to 1 to disable).
+- **CI + loopback smoke test.** A GitHub Actions workflow (`.github/workflows/ci.yml`) now builds on `ubuntu-latest` and runs `tests/smoke.sh`, which spins up a server, client, and a small Python UDP echo, and verifies FEC recovery under both lossless and `--random-drop 1500` (15% loss) conditions using `-f20:10`.
+
+All of the above is on `branch_libev`; no CLI compatibility was broken (every new flag is additive with sensible defaults).
 
 # wiki
 Check wiki for more info:

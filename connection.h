@@ -258,6 +258,46 @@ struct conn_info_t : not_copy_able_t  // stores info for a raw connection.for cl
     // ip_port_t ip_port;
     address_t addr;  // only used for server
 
+    // port-range-mode: per-fd NAT endpoints observed on server receive path
+    struct nat_endpoint_t {
+        address_t addr;      // full client src addr as seen on this data fd
+        int fd_idx;
+        my_time_t last_seen_us;
+    };
+    std::vector<nat_endpoint_t> active_endpoints;
+    size_t reply_rr_counter = 0;   // unsigned: wraps cleanly, never goes negative
+
+    void record_endpoint(const address_t &src, int fd_idx) {
+        my_time_t now = get_current_time_us();
+        for (auto &ep : active_endpoints) {
+            if (ep.fd_idx == fd_idx) {
+                // refresh addr too: a symmetric nat can rebind this mapping to a new
+                // external port, and replies must follow it or they hit a dead one.
+                ep.addr = src;
+                ep.last_seen_us = now;
+                return;
+            }
+        }
+        nat_endpoint_t ep;
+        ep.addr = src;
+        ep.fd_idx = fd_idx;
+        ep.last_seen_us = now;
+        active_endpoints.push_back(ep);
+    }
+
+    nat_endpoint_t *pick_next_endpoint(int keepalive_sec) {
+        if (active_endpoints.empty()) return nullptr;
+        my_time_t now = get_current_time_us();
+        my_time_t threshold = (my_time_t)keepalive_sec * 1000000ULL;
+        for (size_t i = 0; i < active_endpoints.size(); i++) {
+            nat_endpoint_t &ep = active_endpoints[reply_rr_counter % active_endpoints.size()];
+            reply_rr_counter++;
+            if (now - ep.last_seen_us <= threshold) return &ep;
+        }
+        // all stale — return any to avoid dropping the packet entirely
+        return &active_endpoints[0];
+    }
+
     conn_info_t() {
         if (program_mode == server_mode) {
             conv_manager.s.additional_clear_function = server_clear_function;

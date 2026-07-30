@@ -6,6 +6,11 @@
  */
 
 #include "tunnel.h"
+#include "control_proto.h"
+#include <vector>
+
+// port-range-mode: server data fds indexed by fd_idx
+static std::vector<int> g_data_fds;
 
 static void conn_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 static void fec_encode_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
@@ -39,8 +44,14 @@ void data_from_remote_or_fec_timeout_or_conn_timer(conn_info_t &conn_info, fd64_
     my_time_t *out_delay;
 
     dest_t dest;
-    dest.inner.fd_addr.fd = local_listen_fd;
-    dest.inner.fd_addr.addr = addr;
+    if (port_range_mode && !conn_info.active_endpoints.empty()) {
+        conn_info_t::nat_endpoint_t *ep = conn_info.pick_next_endpoint(nat_keepalive_sec);
+        dest.inner.fd_addr.fd  = g_data_fds[ep->fd_idx];
+        dest.inner.fd_addr.addr = ep->addr;
+    } else {
+        dest.inner.fd_addr.fd  = local_listen_fd;
+        dest.inner.fd_addr.addr = addr;
+    }
     dest.type = type_fd_addr;
     dest.cook = 1;
 
@@ -126,132 +137,162 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
     int ret;
 
     mylog(log_trace, "events[idx].data.u64 == (u64_t)local_listen_fd\n");
-    char data[buf_len];
-    int data_len;
-    address_t::storage_t udp_new_addr_in = {0};
-    socklen_t udp_new_addr_len = sizeof(address_t::storage_t);
-    if ((data_len = recvfrom(local_listen_fd, data, max_data_len + 1, 0,
-                             (struct sockaddr *)&udp_new_addr_in, &udp_new_addr_len)) == -1) {
-        mylog(log_error, "recv_from error,this shouldnt happen,err=%s,but we can try to continue\n", get_sock_error());
-        return;
-    };
 
-    if (data_len == max_data_len + 1) {
-        mylog(log_warn, "huge packet, data_len > %d, packet truncated, dropped\n", max_data_len);
-        return;
-    }
-
-    address_t addr;
-    addr.from_sockaddr((struct sockaddr *)&udp_new_addr_in, udp_new_addr_len);
-
-    mylog(log_trace, "Received packet from %s,len: %d\n", addr.get_str(), data_len);
-
-    if (!disable_mtu_warn && data_len >= mtu_warn)  ///////////////////////delete this for type 0 in furture
-    {
-        mylog(log_warn, "huge packet,data len=%d (>=%d).strongly suggested to set a smaller mtu at upper level,to get rid of this warn\n ", data_len, mtu_warn);
-    }
-
-    if (de_cook(data, data_len) != 0) {
-        mylog(log_debug, "de_cook error");
-        return;
-    }
-
-    if (!conn_manager.exist(addr)) {
-        if (conn_manager.mp.size() >= max_conn_num) {
-            mylog(log_warn, "new connection %s ignored bc max_conn_num exceed\n", addr.get_str());
-            return;
+    static char batch_bufs[IO_BATCH_MAX][buf_len];
+    static struct iovec batch_iov[IO_BATCH_MAX];
+    static struct mmsghdr batch_msgs[IO_BATCH_MAX];
+    static address_t::storage_t batch_addrs[IO_BATCH_MAX];
+    static bool init = false;
+    if (!init) {
+        for (int i = 0; i < IO_BATCH_MAX; i++) {
+            batch_iov[i].iov_base = batch_bufs[i];
+            batch_iov[i].iov_len = max_data_len + 1;
+            memset(&batch_msgs[i], 0, sizeof(batch_msgs[i]));
+            batch_msgs[i].msg_hdr.msg_iov = &batch_iov[i];
+            batch_msgs[i].msg_hdr.msg_iovlen = 1;
+            batch_msgs[i].msg_hdr.msg_name = &batch_addrs[i];
+            batch_msgs[i].msg_hdr.msg_namelen = sizeof(address_t::storage_t);
         }
-
-        // conn_manager.insert(addr);
-        conn_info_t &conn_info = conn_manager.find_insert(addr);
-        conn_info.addr = addr;
-        conn_info.loop = ev_default_loop(0);
-        conn_info.local_listen_fd = local_listen_fd;
-
-        // u64_t fec_fd64=conn_info.fec_encode_manager.get_timer_fd64();
-        // mylog(log_debug,"fec_fd64=%llu\n",fec_fd64);
-        // ev.events = EPOLLIN;
-        // ev.data.u64 = fec_fd64;
-        // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd_manager.to_fd(fec_fd64), &ev);
-
-        // fd_manager.get_info(fec_fd64).ip_port=ip_port;
-
-        conn_info.timer.data = &conn_info;
-        ev_init(&conn_info.timer, conn_timer_cb);
-        ev_timer_set(&conn_info.timer, 0, timer_interval / 1000.0);
-        ev_timer_start(loop, &conn_info.timer);
-
-        // conn_info.timer.add_fd64_to_epoll(epoll_fd);
-        // conn_info.timer.set_timer_repeat_us(timer_interval*1000);
-
-        // mylog(log_debug,"conn_info.timer.get_timer_fd64()=%llu\n",conn_info.timer.get_timer_fd64());
-
-        // u64_t timer_fd64=conn_info.timer.get_timer_fd64();
-        // fd_manager.get_info(timer_fd64).ip_port=ip_port;
-
-        conn_info.fec_encode_manager.set_data(&conn_info);
-        conn_info.fec_encode_manager.set_loop_and_cb(loop, fec_encode_cb);
-
-        mylog(log_info, "new connection from %s\n", addr.get_str());
+        init = true;
     }
-    conn_info_t &conn_info = conn_manager.find_insert(addr);
 
-    conn_info.update_active_time();
-    int out_n;
-    char **out_arr;
-    int *out_len;
-    my_time_t *out_delay;
-    from_fec_to_normal(conn_info, data, data_len, out_n, out_arr, out_len, out_delay);
+    // Cap drain rounds so a sustained sender can't keep recvmmsg returning full
+    // batches forever and starve the FEC-timeout/delay/heartbeat/other watchers.
+    // Up to max_drain_rounds*io_batch_size packets per callback before we yield.
+    const int max_drain_rounds = 16;
+    for (int drain_round = 0; drain_round < max_drain_rounds; drain_round++) {
+    for (int i = 0; i < io_batch_size; i++)
+        batch_msgs[i].msg_hdr.msg_namelen = sizeof(address_t::storage_t);
 
-    mylog(log_trace, "out_n= %d\n", out_n);
-    for (int i = 0; i < out_n; i++) {
-        u32_t conv;
-        char *new_data;
-        int new_len;
-        if (get_conv(conv, out_arr[i], out_len[i], new_data, new_len) != 0) {
-            mylog(log_debug, "get_conv failed");
+    int nrecv = recvmmsg(local_listen_fd, batch_msgs, io_batch_size, MSG_DONTWAIT, NULL);
+    if (nrecv <= 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK)
+            mylog(log_error, "recvmmsg error,err=%s,but we can try to continue\n", get_sock_error());
+        break;
+    }
+
+    my_send_batch_begin();
+    for (int p = 0; p < nrecv; p++) {
+        int data_len = (int)batch_msgs[p].msg_len;
+        char *data = batch_bufs[p];
+
+        if (data_len == max_data_len + 1) {
+            mylog(log_warn, "huge packet, data_len > %d, packet truncated, dropped\n", max_data_len);
             continue;
         }
 
-        if (!conn_info.conv_manager.s.is_conv_used(conv)) {
-            if (conn_info.conv_manager.s.get_size() >= max_conv_num) {
-                mylog(log_warn, "ignored new udp connect bc max_conv_num exceed\n");
-                continue;
-            }
+        address_t addr;
+        addr.from_sockaddr((struct sockaddr *)&batch_addrs[p], batch_msgs[p].msg_hdr.msg_namelen);
 
-            int new_udp_fd;
-            ret = new_connected_socket2(new_udp_fd, remote_addr, out_addr, out_interface);
+        mylog(log_trace, "Received packet from %s,len: %d\n", addr.get_str(), data_len);
 
-            if (ret != 0) {
-                mylog(log_warn, "[%s]new_connected_socket failed\n", addr.get_str());
-                continue;
-            }
-
-            fd64_t fd64 = fd_manager.create(new_udp_fd);
-            // ev.events = EPOLLIN;
-            // ev.data.u64 = fd64;
-            // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_udp_fd, &ev);
-
-            conn_info.conv_manager.s.insert_conv(conv, fd64);
-            fd_manager.get_info(fd64).addr = addr;
-
-            ev_io &io_watcher = fd_manager.get_info(fd64).io_watcher;
-            io_watcher.u64 = fd64;
-            io_watcher.data = &conn_info;
-
-            ev_init(&io_watcher, remote_cb);
-            ev_io_set(&io_watcher, new_udp_fd, EV_READ);
-            ev_io_start(conn_info.loop, &io_watcher);
-
-            mylog(log_info, "[%s]new conv %x,fd %d created,fd64=%llu\n", addr.get_str(), conv, new_udp_fd, fd64);
+        if (!disable_mtu_warn && data_len >= mtu_warn)  ///////////////////////delete this for type 0 in furture
+        {
+            mylog(log_warn, "huge packet,data len=%d (>=%d).strongly suggested to set a smaller mtu at upper level,to get rid of this warn\n ", data_len, mtu_warn);
         }
-        conn_info.conv_manager.s.update_active_time(conv);
-        fd64_t fd64 = conn_info.conv_manager.s.find_data_by_conv(conv);
-        dest_t dest;
-        dest.type = type_fd64;
-        dest.inner.fd64 = fd64;
-        delay_send(out_delay[i], dest, new_data, new_len);
+
+        if (de_cook(data, data_len) != 0) {
+            mylog(log_debug, "de_cook error");
+            continue;
+        }
+
+        // Session key. In port-range mode the client sprays one stream across N
+        // destination ports; a symmetric nat then hands out a different external
+        // source port per destination port, so keying on (ip,port) would split one
+        // client into up to N conn_info objects -- fragmenting its fec groups across
+        // N decoders and opening N sockets to '-r'. Key on client ip only. The true
+        // per-fd source address is kept in active_endpoints and used for replies.
+        address_t conn_key = addr;
+        if (port_range_mode) conn_key.set_port(0);
+
+        if (!conn_manager.exist(conn_key)) {
+            if (conn_manager.mp.size() >= max_conn_num) {
+                mylog(log_warn, "new connection %s ignored bc max_conn_num exceed\n", addr.get_str());
+                continue;
+            }
+
+            conn_info_t &new_conn_info = conn_manager.find_insert(conn_key);
+            new_conn_info.addr = conn_key;
+            new_conn_info.loop = ev_default_loop(0);
+            new_conn_info.local_listen_fd = local_listen_fd;
+
+            new_conn_info.timer.data = &new_conn_info;
+            ev_init(&new_conn_info.timer, conn_timer_cb);
+            ev_timer_set(&new_conn_info.timer, 0, timer_interval / 1000.0);
+            ev_timer_start(loop, &new_conn_info.timer);
+
+            new_conn_info.fec_encode_manager.set_data(&new_conn_info);
+            new_conn_info.fec_encode_manager.set_loop_and_cb(loop, fec_encode_cb);
+
+            mylog(log_info, "new connection from %s\n", addr.get_str());
+        }
+
+        conn_info_t &conn_info = conn_manager.find_insert(conn_key);
+        conn_info.update_active_time();
+
+        if (port_range_mode) {
+            int fd_idx = (int)(intptr_t)watcher->data;
+            conn_info.record_endpoint(addr, fd_idx);
+        }
+
+        int out_n;
+        char **out_arr;
+        int *out_len;
+        my_time_t *out_delay;
+        from_fec_to_normal(conn_info, data, data_len, out_n, out_arr, out_len, out_delay);
+
+        mylog(log_trace, "out_n= %d\n", out_n);
+        for (int i = 0; i < out_n; i++) {
+            u32_t conv;
+            char *new_data;
+            int new_len;
+            if (get_conv(conv, out_arr[i], out_len[i], new_data, new_len) != 0) {
+                mylog(log_debug, "get_conv failed");
+                continue;
+            }
+
+            if (!conn_info.conv_manager.s.is_conv_used(conv)) {
+                if (conn_info.conv_manager.s.get_size() >= max_conv_num) {
+                    mylog(log_warn, "ignored new udp connect bc max_conv_num exceed\n");
+                    continue;
+                }
+
+                int new_udp_fd;
+                ret = new_connected_socket2(new_udp_fd, remote_addr, out_addr, out_interface);
+
+                if (ret != 0) {
+                    mylog(log_warn, "[%s]new_connected_socket failed\n", addr.get_str());
+                    continue;
+                }
+
+                fd64_t fd64 = fd_manager.create(new_udp_fd);
+
+                conn_info.conv_manager.s.insert_conv(conv, fd64);
+                // must be the conn_manager key: server_clear_function() looks the
+                // conn_info back up by this address when the conv expires.
+                fd_manager.get_info(fd64).addr = conn_key;
+
+                ev_io &io_watcher = fd_manager.get_info(fd64).io_watcher;
+                io_watcher.u64 = fd64;
+                io_watcher.data = &conn_info;
+
+                ev_init(&io_watcher, remote_cb);
+                ev_io_set(&io_watcher, new_udp_fd, EV_READ);
+                ev_io_start(conn_info.loop, &io_watcher);
+
+                mylog(log_info, "[%s]new conv %x,fd %d created,fd64=%llu\n", addr.get_str(), conv, new_udp_fd, fd64);
+            }
+            conn_info.conv_manager.s.update_active_time(conv);
+            fd64_t fd64 = conn_info.conv_manager.s.find_data_by_conv(conv);
+            dest_t dest;
+            dest.type = type_fd64;
+            dest.inner.fd64 = fd64;
+            delay_send(out_delay[i], dest, new_data, new_len);
+        }
     }
+    my_send_flush();
+    if (nrecv < io_batch_size) break;
+    } // drain loop
 }
 
 static void remote_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
@@ -319,6 +360,75 @@ static void global_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int 
     mylog(log_trace, "events[idx].data.u64==(u64_t)timer.get_timer_fd()\n");
 }
 
+static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+    assert(!(revents & EV_ERROR));
+    (void)loop;
+
+    int ctrl_fd = watcher->fd;
+    static char buf[CTRL_BUF_MAX];
+    address_t::storage_t src_stor;
+    socklen_t src_len = sizeof(src_stor);
+
+    int len = recvfrom(ctrl_fd, buf, sizeof(buf) - 1, 0,
+                       (struct sockaddr *)&src_stor, &src_len);
+    if (len <= 0) return;
+
+    uint8_t *payload;
+    int payload_len;
+    int msg_type = ctrl_decode(buf, len, &payload, &payload_len);
+    if (msg_type < 0) return;
+
+    address_t src;
+    src.from_sockaddr((struct sockaddr *)&src_stor, src_len);
+
+    if (msg_type == CTRL_HELLO) {
+        if (payload_len < (int)sizeof(ctrl_hello_payload_t)) return;
+        ctrl_hello_payload_t *hello = (ctrl_hello_payload_t *)payload;
+
+        ctrl_hello_ack_hdr_t ack_hdr;
+        memcpy(ack_hdr.session_id, hello->session_id, 16);
+        ack_hdr.port_count            = (uint16_t)port_range_mgr.count();
+        ack_hdr.heartbeat_interval_ms = (uint32_t)(heartbeat_interval_sec * 1000);
+        ack_hdr.session_lifetime_ms   = 0;  // unused in v1
+
+        // Build payload: ack_hdr + ports array
+        static char ack_payload[sizeof(ctrl_hello_ack_hdr_t) + 256 * 2];
+        memcpy(ack_payload, &ack_hdr, sizeof(ack_hdr));
+        for (int i = 0; i < port_range_mgr.count(); i++) {
+            uint16_t p = port_range_mgr.ports[i];
+            memcpy(ack_payload + sizeof(ack_hdr) + i * 2, &p, 2);
+        }
+        int ack_payload_len = (int)sizeof(ack_hdr) + port_range_mgr.count() * 2;
+
+        int out_len;
+        char *pkt = ctrl_encode(CTRL_HELLO_ACK, ack_payload, ack_payload_len, &out_len);
+        if (!pkt) return;
+
+        sendto(ctrl_fd, pkt, out_len, 0,
+               (struct sockaddr *)&src_stor, src_len);
+        mylog(log_info, "ctrl: HELLO from %s, sent HELLO_ACK (%d ports)\n",
+              src.get_str(), port_range_mgr.count());
+
+    } else if (msg_type == CTRL_HEARTBEAT) {
+        if (payload_len < (int)sizeof(ctrl_hb_payload_t)) return;
+        ctrl_hb_payload_t *hb = (ctrl_hb_payload_t *)payload;
+
+        ctrl_hb_payload_t hb_ack;
+        memcpy(hb_ack.session_id, hb->session_id, 16);
+
+        int out_len;
+        char *pkt = ctrl_encode(CTRL_HEARTBEAT_ACK, &hb_ack, sizeof(hb_ack), &out_len);
+        if (!pkt) return;
+
+        sendto(ctrl_fd, pkt, out_len, 0,
+               (struct sockaddr *)&src_stor, src_len);
+        mylog(log_debug, "ctrl: HEARTBEAT from %s\n", src.get_str());
+
+    } else if (msg_type == CTRL_BYE) {
+        mylog(log_info, "ctrl: BYE from %s\n", src.get_str());
+    }
+}
+
 int tunnel_server_event_loop() {
     int i, j, k;
     int ret;
@@ -326,46 +436,66 @@ int tunnel_server_event_loop() {
     // int epoll_fd;
     // int remote_fd;
 
-    int local_listen_fd;
-    new_listen_socket2(local_listen_fd, local_addr);
-
-    // epoll_fd = epoll_create1(0);
-    // assert(epoll_fd>0);
-
-    // const int max_events = 4096;
-    // struct epoll_event ev, events[max_events];
-    // if (epoll_fd < 0) {
-    //	mylog(log_fatal,"epoll return %d\n", epoll_fd);
-    //	myexit(-1);
-    // }
-
     struct ev_loop *loop = ev_default_loop(0);
     assert(loop != NULL);
 
-    // ev.events = EPOLLIN;
-    // ev.data.u64 = local_listen_fd;
-    // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, local_listen_fd, &ev);
-    // if (ret!=0) {
-    //	mylog(log_fatal,"add  udp_listen_fd error\n");
-    //	myexit(-1);
-    // }
+    // Dynamically allocated watchers for port-range-mode data + control fds.
+    std::vector<ev_io *> data_watchers;
+    ev_io ctrl_watcher;
+    int local_listen_fd = -1;
     struct ev_io local_listen_watcher;
-    ev_io_init(&local_listen_watcher, local_listen_cb, local_listen_fd, EV_READ);
-    ev_io_start(loop, &local_listen_watcher);
 
-    // ev.events = EPOLLIN;
-    // ev.data.u64 = delay_manager.get_timer_fd();
-    // ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, delay_manager.get_timer_fd(), &ev);
-    // if (ret!= 0) {
-    //	mylog(log_fatal,"add delay_manager.get_timer_fd() error\n");
-    //	myexit(-1);
-    // }
+    if (port_range_mode) {
+        // Build a valid 0.0.0.0 base address for binding; local_addr may be
+        // unset when -l is omitted in port-range-mode server.
+        address_t bind_base;
+        if (local_addr.is_vaild()) {
+            bind_base = local_addr;
+        } else {
+            u32_t any = INADDR_ANY;
+            bind_base.from_ip_port_new(AF_INET, &any, 0);
+        }
+
+        // Bind control socket
+        int ctrl_fd;
+        address_t ctrl_bind_addr = bind_base;
+        ctrl_bind_addr.set_port(ctrl_port);
+        if (new_listen_socket2(ctrl_fd, ctrl_bind_addr) != 0) {
+            mylog(log_fatal, "failed to bind control port %d\n", ctrl_port);
+            myexit(-1);
+        }
+        ev_io_init(&ctrl_watcher, control_listen_cb, ctrl_fd, EV_READ);
+        ev_io_start(loop, &ctrl_watcher);
+        mylog(log_info, "port-range-mode: control port %d listening\n", ctrl_port);
+
+        // Bind N data sockets
+        g_data_fds.clear();
+        for (int i = 0; i < port_range_mgr.count(); i++) {
+            int dfd;
+            address_t data_bind = bind_base;
+            data_bind.set_port(port_range_mgr.ports[i]);
+            if (new_listen_socket2(dfd, data_bind) != 0) {
+                mylog(log_fatal, "failed to bind data port %d\n", port_range_mgr.ports[i]);
+                myexit(-1);
+            }
+            g_data_fds.push_back(dfd);
+
+            ev_io *dw = new ev_io;
+            dw->data = (void *)(intptr_t)i;  // fd_idx
+            ev_io_init(dw, local_listen_cb, dfd, EV_READ);
+            ev_io_start(loop, dw);
+            data_watchers.push_back(dw);
+        }
+        mylog(log_info, "port-range-mode: %d data ports listening (%s)\n",
+              port_range_mgr.count(), data_port_range_str);
+    } else {
+        new_listen_socket2(local_listen_fd, local_addr);
+        ev_io_init(&local_listen_watcher, local_listen_cb, local_listen_fd, EV_READ);
+        ev_io_start(loop, &local_listen_watcher);
+        mylog(log_info, "now listening at %s\n", local_addr.get_str());
+    }
 
     delay_manager.set_loop_and_cb(loop, delay_manager_cb);
-
-    // mylog(log_debug," delay_manager.get_timer_fd() =%d\n", delay_manager.get_timer_fd());
-
-    mylog(log_info, "now listening at %s\n", local_addr.get_str());
 
     // my_timer_t timer;
     // timer.add_fd_to_epoll(epoll_fd);

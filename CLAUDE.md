@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-UDPspeeder V2 (`speederv2`) — a UDP tunnel that reduces packet loss on lossy links by applying Reed-Solomon Forward Error Correction, optionally combined with a UDP-based VPN to accelerate arbitrary traffic. C++11, event-loop based (libev), Linux only (desktop Linux / Android / OpenWRT / Raspberry Pi).
+UDPspeeder V2 (`speederv2`) — a UDP tunnel that reduces packet loss on lossy links by applying Reed-Solomon Forward Error Correction, optionally combined with a UDP-based VPN to accelerate arbitrary traffic. C++11, event-loop based (libev), Linux x86 / x86_64 only.
 
 ## Build
 
@@ -14,7 +14,7 @@ Common targets:
 - `make` — native Linux static build with `-O2` (produces `speederv2`).
 - `make debug` — defines `MY_DEBUG`, no `-O2`, includes `-Wformat-nonliteral`. Use this when iterating on protocol/state logic.
 - `make fast` — optimized build with debug symbols, no `MY_DEBUG`.
-- `make mips24kc_be`, `make mips24kc_le`, `make arm`, `make amd64`, `make x86` — OpenWRT/embedded cross-compiles; paths to toolchains are hard-coded at the top of the makefile and must be adjusted for your environment.
+- `make amd64`, `make x86` — static cross-compiles via the bundled OpenWRT x86 musl toolchains; paths are hard-coded at the top of the makefile and must be adjusted for your environment.
 - `make release` — builds all cross targets and tarballs them.
 - `make clean` — removes binaries and `git_version.h`.
 
