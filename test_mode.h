@@ -82,6 +82,33 @@ trace_stats_t trace_analyze(const trace_t &t);
 // Returns -1.0 if the window does not fit the trace.
 double test_residual(const trace_t &t, int x, int y);
 
+const int TEST_I_CAP_MS = 50;
+const int TEST_X_MAX    = 30;
+const double TIER_THRIFTY_TARGET    = 0.01;    // 1%
+const double TIER_BALANCED_TARGET   = 0.001;   // 0.1%
+const double TIER_AGGRESSIVE_TARGET = 0.0001;  // 0.01%
+
+struct tier_t {
+    bool   feasible;
+    int    x, y, i_ms;
+    double residual;      // 0..1
+    double overhead;      // y/x
+    double actual_mbps;
+    bool   extrapolated;  // target below sampling resolution
+};
+
+struct recommendation_t {
+    trace_stats_t stats;
+    tier_t thrifty, balanced, aggressive;
+};
+
+// 0 when losses are isolated (run_p95 <= 1); else ceil(D*(x+y)/y).
+int test_derive_interval_ms(const trace_stats_t &st, int x, int y);
+
+tier_t test_pick_tier(const trace_t &t, const trace_stats_t &st, double target);
+
+recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size);
+
 // ---- entry points ----
 int test_mode_prober_loop();
 int test_mode_responder_loop();

@@ -158,6 +158,75 @@ double test_residual(const trace_t &t, int x, int y) {
     return (double)failed / (double)windows;
 }
 
+// ---------------- -i derivation and three-tier selection ----------------
+int test_derive_interval_ms(const trace_stats_t &st, int x, int y) {
+    if (st.run_p95 <= 1) return 0;          // losses are isolated; scattering buys nothing
+    if (y <= 0) return 0;                    // no redundancy to protect
+    if (st.burst_p95_ms <= 0.0) return 0;
+    double need = st.burst_p95_ms * (double)(x + y) / (double)y;
+    return (int)ceil(need);
+}
+
+tier_t test_pick_tier(const trace_t &t, const trace_stats_t &st, double target) {
+    tier_t best;
+    memset(&best, 0, sizeof(best));
+    best.feasible = false;
+
+    for (int x = 1; x <= TEST_X_MAX; x++) {
+        int y_max = 3 * x;
+        if (y_max > 254 - x) y_max = 254 - x;
+        for (int y = 0; y <= y_max; y++) {
+            if ((uint32_t)(x + y) > t.expected_n) continue;
+            double r = test_residual(t, x, y);
+            if (r < 0.0 || r > target) continue;
+
+            // Scattering requirement; if it exceeds the cap, prefer more y
+            // (i.e. reject this candidate) per spec section 6.4.
+            int i_ms = test_derive_interval_ms(st, x, y);
+            if (i_ms > TEST_I_CAP_MS) continue;
+
+            double overhead = (double)y / (double)x;
+            bool better = !best.feasible || overhead < best.overhead - 1e-12;
+            if (!better && fabs(overhead - best.overhead) <= 1e-12) {
+                if (i_ms < best.i_ms) better = true;
+                else if (i_ms == best.i_ms && x > best.x) better = true;
+            }
+            if (better) {
+                best.feasible = true;
+                best.x = x;
+                best.y = y;
+                best.i_ms = i_ms;
+                best.residual = r;
+                best.overhead = overhead;
+            }
+        }
+    }
+    best.extrapolated = (target < st.resolution);
+    return best;
+}
+
+recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size) {
+    recommendation_t rec;
+    rec.stats = trace_analyze(t);
+
+    rec.thrifty    = test_pick_tier(t, rec.stats, TIER_THRIFTY_TARGET);
+    rec.balanced   = test_pick_tier(t, rec.stats, TIER_BALANCED_TARGET);
+    rec.aggressive = test_pick_tier(t, rec.stats, TIER_AGGRESSIVE_TARGET);
+
+    double hdr_factor = 1.0;
+    if (pkt_size > 0) hdr_factor = 1.0 + 16.0 / (double)pkt_size;
+
+    tier_t *tiers[3] = {&rec.thrifty, &rec.balanced, &rec.aggressive};
+    for (int k = 0; k < 3; k++) {
+        if (tiers[k]->feasible) {
+            tiers[k]->actual_mbps = app_mbps * (1.0 + tiers[k]->overhead) * hdr_factor;
+        } else {
+            tiers[k]->actual_mbps = 0.0;
+        }
+    }
+    return rec;
+}
+
 // ---------------- selftest harness ----------------
 static int g_checks = 0;
 static int g_failures = 0;
@@ -413,6 +482,92 @@ int test_mode_selftest() {
         // determinism
         TCHECK(test_residual(t4, 20, 4) == test_residual(t4, 20, 4),
                "residual must be deterministic");
+    }
+
+    // ---- interval derivation ----
+    {
+        trace_stats_t st;
+        memset(&st, 0, sizeof(st));
+
+        // isolated losses -> no scattering
+        st.run_p95 = 1;
+        st.burst_p95_ms = 5.0;
+        TCHECK(test_derive_interval_ms(st, 20, 6) == 0,
+               "isolated losses must give -i 0, got %d", test_derive_interval_ms(st, 20, 6));
+
+        // y == 0 -> scattering cannot help
+        st.run_p95 = 3;
+        st.burst_p95_ms = 10.0;
+        TCHECK(test_derive_interval_ms(st, 20, 0) == 0, "y=0 must give -i 0");
+
+        // D=10ms, x=20, y=6 -> 10*26/6 = 43.33 -> 44
+        TCHECK(test_derive_interval_ms(st, 20, 6) == 44,
+               "D=10 x=20 y=6 must give 44, got %d", test_derive_interval_ms(st, 20, 6));
+        // D=10ms, x=20, y=3 -> 10*23/3 = 76.67 -> 77 (over the 50ms cap)
+        TCHECK(test_derive_interval_ms(st, 20, 3) == 77,
+               "D=10 x=20 y=3 must give 77, got %d", test_derive_interval_ms(st, 20, 3));
+    }
+
+    // ---- tier selection ----
+    {
+        // isolated 2% loss, no bursts
+        trace_t t;
+        t.init(2000, 200);
+        for (uint32_t s = 0; s < 2000; s++) {
+            if (s % 50 != 0) t.record(s, 1000000ULL + s * 5000ULL);
+        }
+        trace_stats_t st = trace_analyze(t);
+        tier_t bal = test_pick_tier(t, st, TIER_BALANCED_TARGET);
+        TCHECK(bal.feasible, "balanced tier must be feasible on isolated 2%% loss");
+        TCHECK(bal.residual <= TIER_BALANCED_TARGET,
+               "balanced residual %f must meet target", bal.residual);
+        TCHECK(bal.y >= 1, "balanced tier must use redundancy, got y=%d", bal.y);
+        TCHECK(bal.i_ms == 0, "isolated losses must give -i 0, got %d", bal.i_ms);
+
+        // bursts of 5 -> chosen y must cover the burst
+        trace_t t2;
+        t2.init(2000, 200);
+        for (uint32_t s = 0; s < 2000; s++) {
+            if ((s % 100) >= 5) t2.record(s, 1000000ULL + s * 5000ULL);
+        }
+        trace_stats_t st2 = trace_analyze(t2);
+        tier_t bal2 = test_pick_tier(t2, st2, TIER_BALANCED_TARGET);
+        TCHECK(bal2.feasible, "balanced tier must be feasible on burst-5 trace");
+        TCHECK(bal2.y >= 5, "burst of 5 needs y>=5, got y=%d", bal2.y);
+        TCHECK(bal2.i_ms > 0 && bal2.i_ms <= TEST_I_CAP_MS,
+               "burst trace must give 0 < -i <= cap, got %d", bal2.i_ms);
+
+        // total loss -> infeasible, no fabricated numbers
+        trace_t t3;
+        t3.init(2000, 200);
+        trace_stats_t st3 = trace_analyze(t3);
+        tier_t bad = test_pick_tier(t3, st3, TIER_BALANCED_TARGET);
+        TCHECK(!bad.feasible, "total-loss trace must report infeasible");
+
+        // bandwidth conversion: 20:6 on 10 Mbps payload, 1200B packets
+        // 10 * 1.30 * (1 + 16/1200) = 13.173...
+        recommendation_t rec = test_evaluate(t, 10.0, 1200);
+        TCHECK(rec.balanced.feasible, "evaluate must produce a feasible balanced tier");
+        double expect = 10.0 * (1.0 + (double)rec.balanced.y / rec.balanced.x)
+                             * (1.0 + 16.0 / 1200.0);
+        TCHECK(fabs(rec.balanced.actual_mbps - expect) < 0.01,
+               "actual_mbps %f must match %f", rec.balanced.actual_mbps, expect);
+
+        // extrapolation flag. n=2000 -> resolution 0.0005.
+        // aggressive target 0.0001 < 0.0005  -> must be flagged
+        // balanced   target 0.0010 > 0.0005  -> must NOT be flagged
+        TCHECK(rec.aggressive.extrapolated,
+               "aggressive target 0.01%% is below the 0.05%% resolution of a 2000-sample "
+               "trace, so it must be flagged extrapolated");
+        TCHECK(!rec.balanced.extrapolated,
+               "balanced target 0.1%% is above the 0.05%% resolution, so it must not be "
+               "flagged extrapolated");
+
+        // determinism
+        recommendation_t rec2 = test_evaluate(t, 10.0, 1200);
+        TCHECK(rec.balanced.x == rec2.balanced.x && rec.balanced.y == rec2.balanced.y
+                   && rec.balanced.i_ms == rec2.balanced.i_ms,
+               "evaluate must be deterministic");
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
