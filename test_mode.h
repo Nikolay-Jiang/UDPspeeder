@@ -78,6 +78,10 @@ struct trace_stats_t {
 
 trace_stats_t trace_analyze(const trace_t &t);
 
+// Fraction of sliding windows of size (x+y) containing more than y losses.
+// Returns -1.0 if the window does not fit the trace.
+double test_residual(const trace_t &t, int x, int y);
+
 // ---- entry points ----
 int test_mode_prober_loop();
 int test_mode_responder_loop();

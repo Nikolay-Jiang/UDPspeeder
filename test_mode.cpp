@@ -138,6 +138,26 @@ trace_stats_t trace_analyze(const trace_t &t) {
     return st;
 }
 
+double test_residual(const trace_t &t, int x, int y) {
+    if (x < 1 || y < 0) return -1.0;
+    int w = x + y;
+    if (w <= 0 || (uint32_t)w > t.expected_n) return -1.0;
+
+    // prefix[k] = number of losses in [0, k)
+    std::vector<uint32_t> prefix(t.expected_n + 1, 0);
+    for (uint32_t s = 0; s < t.expected_n; s++) {
+        prefix[s + 1] = prefix[s] + (t.arrived[s] ? 0u : 1u);
+    }
+
+    uint32_t windows = t.expected_n - (uint32_t)w + 1;
+    uint32_t failed = 0;
+    for (uint32_t s = 0; s < windows; s++) {
+        uint32_t losses = prefix[s + w] - prefix[s];
+        if ((int)losses > y) failed++;
+    }
+    return (double)failed / (double)windows;
+}
+
 // ---------------- selftest harness ----------------
 static int g_checks = 0;
 static int g_failures = 0;
@@ -356,6 +376,43 @@ int test_mode_selftest() {
                    "trailing run: percentiles must be 5, got p50=%u p95=%u",
                    se.run_p50, se.run_p95);
         }
+    }
+
+    // ---- residual ----
+    {
+        // zero loss -> residual 0 for any candidate
+        trace_t t;
+        t.init(1000, 200);
+        for (uint32_t s = 0; s < 1000; s++) t.record(s, 1000000ULL + s * 5000ULL);
+        TCHECK(test_residual(t, 20, 6) == 0.0, "zero-loss trace must give residual 0");
+
+        // total loss -> every window fails
+        trace_t t2;
+        t2.init(1000, 200);
+        TCHECK(fabs(test_residual(t2, 20, 6) - 1.0) < 1e-9,
+               "total-loss trace must give residual 1.0");
+
+        // window larger than trace -> -1
+        trace_t t3;
+        t3.init(10, 200);
+        TCHECK(test_residual(t3, 20, 6) == -1.0, "oversized window must return -1");
+
+        // exact burst pattern: 5 lost every 100.
+        // window 26 (=20+6) with y=6 tolerates 6 losses; max losses in any
+        // 26-wide window here is 5, so no window may fail.
+        trace_t t4;
+        t4.init(1000, 200);
+        for (uint32_t s = 0; s < 1000; s++) {
+            if ((s % 100) >= 5) t4.record(s, 1000000ULL + s * 5000ULL);
+        }
+        TCHECK(test_residual(t4, 20, 6) == 0.0,
+               "burst of 5 must be fully covered by y=6, got %f", test_residual(t4, 20, 6));
+        // y=4 cannot cover a burst of 5 -> some windows must fail
+        TCHECK(test_residual(t4, 20, 4) > 0.0, "y=4 must fail against a burst of 5");
+
+        // determinism
+        TCHECK(test_residual(t4, 20, 4) == test_residual(t4, 20, 4),
+               "residual must be deterministic");
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
