@@ -236,6 +236,14 @@ static prober_ctx_t g_pr;
 static int prober_sendto(int msg_type, int phase, uint32_t seq,
                           const void *payload, int payload_len,
                           const address_t &dst, int pad_to) {
+    // The tunnel's --random-drop lives in my_send() behind dest.cook, which
+    // test mode does not use. Reimplement it here so smoke tests can inject a
+    // known loss rate. Only TEST_PROBE is dropped: dropping control messages
+    // (HELLO/PHASE_BEGIN/PHASE_END/REQUEST_RESULT) would break the handshake
+    // or result collection instead of simulating link loss.
+    if (random_drop != 0 && msg_type == TEST_PROBE) {
+        if (get_fake_random_number() % 10000 < (u32_t)random_drop) return 0;
+    }
     char out[TEST_BUF_MAX];
     int n = test_encode(msg_type, phase, seq, payload, payload_len,
                          out, sizeof(out), pad_to);
