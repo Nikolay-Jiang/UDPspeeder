@@ -924,9 +924,15 @@ recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size);
         TCHECK(fabs(rec.balanced.actual_mbps - expect) < 0.01,
                "actual_mbps %f must match %f", rec.balanced.actual_mbps, expect);
 
-        // extrapolation flag: target below sampling resolution
-        TCHECK(rec.aggressive.extrapolated || TIER_AGGRESSIVE_TARGET >= st.resolution,
-               "aggressive tier must be flagged extrapolated when below resolution");
+        // extrapolation flag. n=2000 -> resolution 0.0005.
+        // aggressive target 0.0001 < 0.0005  -> must be flagged
+        // balanced   target 0.0010 > 0.0005  -> must NOT be flagged
+        TCHECK(rec.aggressive.extrapolated,
+               "aggressive target 0.01%% is below the 0.05%% resolution of a 2000-sample "
+               "trace, so it must be flagged extrapolated");
+        TCHECK(!rec.balanced.extrapolated,
+               "balanced target 0.1%% is above the 0.05%% resolution, so it must not be "
+               "flagged extrapolated");
 
         // determinism
         recommendation_t rec2 = test_evaluate(t, 10.0, 1200);
@@ -1208,10 +1214,11 @@ void test_render_report(const test_report_t &r);
         r.have_down = false;
         r.have_spread = false;
 
+        // Reaching the statements after each call is itself the evidence that
+        // rendering returned; do not add a vacuous TCHECK(true, ...) here.
         printf("---- selftest: sample report begin ----\n");
         test_render_report(r);
         printf("---- selftest: sample report end ----\n");
-        TCHECK(true, "render must not crash");
 
         // infeasible-everything report must render too
         trace_t t2;
@@ -1580,17 +1587,16 @@ int test_mode_responder_loop() {
 
 `test_mode.cpp` 顶部补 `#include "port_range_manager.h"` 与 `#include "misc.h"`(为 `local_addr`、`port_range_mgr`)。
 
-- [ ] **Step 2: 运行以确认失败模式已消失**
-
-先确认未实现时的行为(此步在 Step 1 之前不可行,故此处作为回归确认):
+- [ ] **Step 2: 确认 responder 能启动并绑定**
 
 Run:
 ```bash
-./speederv2 -s --test-mode -l0.0.0.0:34567 -k pd --log-level 4 &
-sleep 1
-grep -q "responder listening" <(jobs >/dev/null 2>&1; true) || true
+make 2>&1 | grep -Ei "error|warning"
+./speederv2 -s --test-mode -l0.0.0.0:34567 -k pd --log-level 4 > /tmp/r0.log 2>&1 &
+RESP=$!; sleep 1; kill $RESP 2>/dev/null; wait $RESP 2>/dev/null
+grep -c "responder listening at 0.0.0.0:34567" /tmp/r0.log
 ```
-Expected: 进程启动并输出 `test: responder listening at 0.0.0.0:34567`
+Expected: 无 error/warning;最后一行输出 `1`
 
 - [ ] **Step 3: 验证 MAC 拒绝路径与源锁定**
 
@@ -1650,6 +1656,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **编排(依 spec §3):** 先跑速率扫描 R1..R3(各 10s,`0.5×/1×/2×`,单端口上行),再跑 S1(单端口上行)、S2(单端口下行)、S3/S4(多端口,仅当给了 `--data-port-range`)。总时长 ≈ `4×duration + 30s`,**必须打印阶段进度**。
 
 本任务只实现**上行阶段(R1..R3、S1、S3)**并渲染报告;下行阶段 S2/S4 需要 responder 反向发流,留待后续迭代——报告以 `have_down = false` 渲染,不显示伪造的下行数据。这样本任务即可独立交付并端到端验证。
+
+**关于结构的有意决定:** prober 采用**阻塞式**(`select` + `usleep`)而非 libev 事件驱动,尽管 `CLAUDE.md` 描述本项目为 event-loop based。理由:prober 是一次性诊断工具,各阶段严格顺序执行,阻塞写法最直白;事件驱动版本需要为握手/阶段/重试/结果索取写一整套状态机,复杂度显著上升而无收益。这是经确认的有意偏离项目约定,**不是缺陷**。responder(Task 8)仍是 libev 事件驱动,因为它必须同时服务多个端口。
 
 - [ ] **Step 1: 写实现**
 
