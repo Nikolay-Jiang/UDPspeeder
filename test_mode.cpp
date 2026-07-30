@@ -410,13 +410,9 @@ static int g_failures = 0;
         }                                            \
     } while (0)
 
-// placeholder loop, implemented in Task 9. The responder loop lives in
-// test_mode_net.cpp (Task 8).
-int test_mode_prober_loop() {
-    mylog(log_fatal, "test-mode prober not implemented yet\n");
-    myexit(-1);
-    return 0;
-}
+// The prober loop (Task 9) and the responder loop (Task 8) both live in
+// test_mode_net.cpp; this file stays pure protocol/statistics logic plus the
+// selftest harness below.
 
 int test_mode_selftest() {
     g_checks = 0;
