@@ -299,6 +299,20 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         uint32_t expected_n = read_u32((char *)pl + 0);
         uint32_t pps        = read_u32((char *)pl + 4);
         uint32_t dir        = read_u32((char *)pl + 8);  // 0 = prober->responder
+
+        // A duplicate or delayed PHASE_BEGIN for the phase already running must
+        // NOT re-init the trace: that discards every probe recorded so far and
+        // reports all of them as lost, manufacturing massive phantom loss in
+        // exactly the way this feature has been bitten by twice before. The
+        // prober re-sends PHASE_BEGIN whenever its PHASE_ACK went missing, so
+        // this is a live path, not a theoretical one. Re-ACK and ignore.
+        if (dir == 0 && g_resp.phase_open && h.phase == g_resp.phase) {
+            mylog(log_debug, "test: duplicate PHASE_BEGIN for open phase %d, "
+                             "re-acking without resetting the trace\n", g_resp.phase);
+            responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
+            return;
+        }
+
         if (expected_n == 0 || expected_n > TEST_MAX_EXPECTED_N) {
             mylog(log_warn, "test: refusing expected_n=%u (cap %u)\n",
                   expected_n, TEST_MAX_EXPECTED_N);
@@ -505,6 +519,16 @@ static bool prober_exchange(int msg_type, int phase, const void *payload, int pa
             int pl_len = 0;
             int mt = test_decode(buf, len, &h, &pl, &pl_len);
             if (mt != want_type) continue;
+            if (h.phase != (uint8_t)phase) {
+                // Every reply in this protocol echoes the request's phase. A
+                // stale one (e.g. a RESULT for the previous phase, arriving
+                // late) mis-attributed to this phase is a silently wrong
+                // number in the report -- the worst failure mode here.
+                mylog(log_debug, "test: dropping msg_type %d carrying phase %d "
+                                 "while waiting on phase %d\n",
+                      mt, (int)h.phase, phase);
+                continue;
+            }
             g_pr.rtt_us = get_current_time_us() - t0;
             if (out_payload && out_payload_len) {
                 // Always assign *out_payload_len, including the zero case: it

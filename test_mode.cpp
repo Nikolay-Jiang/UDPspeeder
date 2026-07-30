@@ -25,7 +25,9 @@ static void test_mac_compute(const char *body, int body_len, char out[TEST_MAC_L
 int test_encode(int msg_type, int phase, uint32_t seq,
                 const void *payload, int payload_len,
                 char *out, int out_cap, int pad_to) {
-    if (payload_len < 0) return -1;
+    // Bound payload_len before it is added to anything: an absurd value would
+    // overflow the int arithmetic below and could make the capacity checks pass.
+    if (payload_len < 0 || payload_len > TEST_BUF_MAX) return -1;
     int body = TEST_HDR_LEN + payload_len;
     int total = body + TEST_MAC_LEN;
     if (pad_to > total) {
@@ -317,6 +319,12 @@ int test_display_width(const char *s) {
             w += 1;
         } else {
             int len = (*p >= 0xf0) ? 4 : (*p >= 0xe0) ? 3 : 2;
+            // A lead byte announcing more continuation bytes than the string
+            // actually holds would walk p straight past the NUL. Unreachable
+            // with today's literal inputs, but the loop must not depend on that.
+            for (int k = 1; k < len; k++) {
+                if (p[k] == 0) { len = k; break; }
+            }
             // Every non-ASCII glyph this report prints is CJK: 2 columns.
             w += (len >= 3) ? 2 : 1;
             p += len;
