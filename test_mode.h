@@ -109,6 +109,13 @@ tier_t test_pick_tier(const trace_t &t, const trace_stats_t &st, double target);
 
 recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size);
 
+enum rate_verdict_t { RATE_RANDOM = 0, RATE_POLICED, RATE_UNCERTAIN };
+
+// Significant iff the rise exceeds 3x the combined binomial standard error.
+rate_verdict_t test_rate_verdict(double p_half, uint32_t n_half,
+                                 double p_nom, uint32_t n_nom,
+                                 double p_double, uint32_t n_double);
+
 // ---- entry points ----
 int test_mode_prober_loop();
 int test_mode_responder_loop();

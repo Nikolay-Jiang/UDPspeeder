@@ -227,6 +227,27 @@ recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size) 
     return rec;
 }
 
+static bool rate_sig_increase(double p1, uint32_t n1, double p2, uint32_t n2) {
+    if (n1 == 0 || n2 == 0) return false;
+    double v1 = p1 * (1.0 - p1) / (double)n1;
+    double v2 = p2 * (1.0 - p2) / (double)n2;
+    double se = sqrt(v1 + v2);
+    if (se <= 0.0) return false;
+    return (p2 - p1) > 3.0 * se;
+}
+
+rate_verdict_t test_rate_verdict(double p_half, uint32_t n_half,
+                                 double p_nom, uint32_t n_nom,
+                                 double p_double, uint32_t n_double) {
+    bool span_sig = rate_sig_increase(p_half, n_half, p_double, n_double);
+    bool tail_sig = rate_sig_increase(p_nom, n_nom, p_double, n_double);
+    bool monotonic = (p_double > p_nom) && (p_nom > p_half);
+
+    if (monotonic && span_sig) return RATE_POLICED;
+    if (!span_sig && !tail_sig) return RATE_RANDOM;
+    return RATE_UNCERTAIN;
+}
+
 // ---------------- selftest harness ----------------
 static int g_checks = 0;
 static int g_failures = 0;
@@ -579,6 +600,30 @@ int test_mode_selftest() {
         TCHECK(rec.balanced.x == rec2.balanced.x && rec.balanced.y == rec2.balanced.y
                    && rec.balanced.i_ms == rec2.balanced.i_ms,
                "evaluate must be deterministic");
+    }
+
+    // ---- rate verdict ----
+    {
+        // flat within noise -> random
+        TCHECK(test_rate_verdict(0.0200, 2000, 0.0205, 2000, 0.0198, 2000) == RATE_RANDOM,
+               "flat loss must be RATE_RANDOM");
+
+        // strong monotonic rise -> policed
+        TCHECK(test_rate_verdict(0.0100, 2000, 0.0500, 2000, 0.2000, 2000) == RATE_POLICED,
+               "monotonic large rise must be RATE_POLICED");
+
+        // rise present but not monotonic -> uncertain
+        TCHECK(test_rate_verdict(0.0100, 2000, 0.0050, 2000, 0.2000, 2000) == RATE_UNCERTAIN,
+               "non-monotonic rise must be RATE_UNCERTAIN");
+
+        // tiny sample: same point estimates as the 'policed' case but too few
+        // samples to be significant -> must not claim policed
+        TCHECK(test_rate_verdict(0.0100, 20, 0.0500, 20, 0.2000, 20) != RATE_POLICED,
+               "20-sample rise must not be declared policed");
+
+        // zero loss everywhere -> random
+        TCHECK(test_rate_verdict(0.0, 2000, 0.0, 2000, 0.0, 2000) == RATE_RANDOM,
+               "zero loss must be RATE_RANDOM");
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
