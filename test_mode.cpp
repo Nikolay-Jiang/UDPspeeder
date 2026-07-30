@@ -290,7 +290,8 @@ static void render_direction(const char *label, const recommendation_t &rec) {
     }
 
     printf("\n--- 推荐配置 (%s) ---\n", label);
-    printf("  档位   %-8s %-7s %-14s %-9s %s\n", "-f", "-i", "预计残余", "冗余开销", "实际占用");
+    printf("  %-6s %-8s %-7s %-14s %-9s %s\n",
+           "档位", "-f", "-i", "预计残余", "冗余开销", "实际占用");
     const tier_t *tiers[3] = {&rec.thrifty, &rec.balanced, &rec.aggressive};
     for (int k = 0; k < 3; k++) render_tier_row(*tiers[k], k, k == 1);
     printf("  * = 默认推荐\n");
