@@ -537,6 +537,17 @@ int test_mode_selftest() {
         TCHECK(bal2.i_ms > 0 && bal2.i_ms <= TEST_I_CAP_MS,
                "burst trace must give 0 < -i <= cap, got %d", bal2.i_ms);
 
+        // Pin the tie-break. ~26 candidates tie here at overhead 1.0 / i_ms 50
+        // (x == y, 5..30); the rule "larger x wins on equal overhead" must pick 30.
+        // A reversed tie-break would satisfy every other assertion in this block.
+        TCHECK(bal2.x == 30 && bal2.y == 30,
+               "tie-break must pick the largest x on equal overhead: expected x=30 y=30, got x=%d y=%d",
+               bal2.x, bal2.y);
+        TCHECK(bal2.i_ms == 50,
+               "burst-5 fixture: i_ms must be exactly the 50ms cap, got %d", bal2.i_ms);
+        TCHECK(fabs(bal2.overhead - 1.0) < 1e-9,
+               "burst-5 fixture: minimum feasible overhead must be 1.0, got %f", bal2.overhead);
+
         // total loss -> infeasible, no fabricated numbers
         trace_t t3;
         t3.init(2000, 200);
