@@ -5,6 +5,7 @@
 #include "log.h"
 #include "misc.h"
 #include "port_range_manager.h"
+#include <signal.h>
 #include <sys/select.h>
 #include <unistd.h>
 #include <vector>
@@ -503,6 +504,17 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
 }
 
 int test_mode_prober_loop() {
+    // main() installs SIGINT/SIGTERM as libev signal watchers, whose handlers
+    // only set a pending flag and defer the real callback to ev_run(). The
+    // prober is deliberately blocking (select + usleep) and never enters
+    // ev_run, so both signals would be swallowed outright -- leaving kill -9 as
+    // the only way to stop a foreground tool that runs for 1-2.5 minutes (and
+    // SIGKILL is exactly what wedges the responder's pinned session). Restore
+    // the default disposition for the duration of the blocking phases. The
+    // responder is untouched: it does run ev_run, so its watchers work.
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+
     address_t ephemeral;
     ephemeral.from_str((char *)"0.0.0.0:0");
     if (new_listen_socket2(g_pr.fd, ephemeral) != 0) {
