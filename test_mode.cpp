@@ -296,6 +296,66 @@ int test_mode_selftest() {
         }
         trace_stats_t st4 = trace_analyze(t4);
         TCHECK(st4.run_max == 1, "isolated losses: run_max must be 1, got %u", st4.run_max);
+
+        // Heterogeneous run lengths: runs are 1,2,3,4 packets long, so the
+        // nearest-rank percentile formula is actually distinguishable from
+        // "return any element". Layout below is explicit rather than modular
+        // so the expected percentiles can be read straight off it.
+        // seq:      0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
+        // lost:     .  X  .  X  X  .  X  X  X  .  X  X  X  X  .  .  .  .  .  .
+        // runs:        1     2        3           4
+        {
+            trace_t th;
+            th.init(20, 200);
+            const bool lost[20] = {false, true,  false, true,  true,
+                                   false, true,  true,  true,  false,
+                                   true,  true,  true,  true,  false,
+                                   false, false, false, false, false};
+            for (uint32_t s = 0; s < 20; s++) {
+                if (!lost[s]) th.record(s, 1000000ULL + s * 5000ULL);
+            }
+            trace_stats_t sh = trace_analyze(th);
+            TCHECK(sh.lost_n == 10, "heterogeneous: lost_n must be 10, got %u", sh.lost_n);
+            TCHECK(sh.run_max == 4, "heterogeneous: run_max must be 4, got %u", sh.run_max);
+            // sorted run lengths [1,2,3,4]: p50 -> idx = 0.50*3+0.5 = 2 -> 3
+            TCHECK(sh.run_p50 == 3, "heterogeneous: run_p50 must be 3, got %u", sh.run_p50);
+            // p95 -> idx = 0.95*3+0.5 = 3.35 -> 3 -> 4
+            TCHECK(sh.run_p95 == 4, "heterogeneous: run_p95 must be 4, got %u", sh.run_p95);
+            // 4 packets at 200pps == 20ms
+            TCHECK(fabs(sh.burst_p95_ms - 20.0) < 0.001,
+                   "heterogeneous: burst_p95_ms must be 20.0, got %f", sh.burst_p95_ms);
+        }
+
+        // Single run: size-1 == 0, so the percentile index must not go out of
+        // bounds and both percentiles must land on the only run.
+        {
+            trace_t ts;
+            ts.init(10, 200);
+            for (uint32_t s = 0; s < 10; s++) {
+                if (s < 3 || s > 5) ts.record(s, 1000000ULL + s * 5000ULL);
+            }
+            trace_stats_t ss = trace_analyze(ts);
+            TCHECK(ss.lost_n == 3, "single-run: lost_n must be 3, got %u", ss.lost_n);
+            TCHECK(ss.run_p50 == 3 && ss.run_p95 == 3 && ss.run_max == 3,
+                   "single-run: all run stats must be 3, got p50=%u p95=%u max=%u",
+                   ss.run_p50, ss.run_p95, ss.run_max);
+        }
+
+        // A loss run that reaches the final sequence number must still be
+        // counted: a loop that only closes runs on seeing an arrival drops it.
+        {
+            trace_t te;
+            te.init(10, 200);
+            for (uint32_t s = 0; s < 5; s++) te.record(s, 1000000ULL + s * 5000ULL);
+            trace_stats_t se = trace_analyze(te);
+            TCHECK(se.lost_n == 5, "trailing run: lost_n must be 5, got %u", se.lost_n);
+            TCHECK(se.run_max == 5,
+                   "trailing run reaching the last seq must be counted, got run_max=%u",
+                   se.run_max);
+            TCHECK(se.run_p50 == 5 && se.run_p95 == 5,
+                   "trailing run: percentiles must be 5, got p50=%u p95=%u",
+                   se.run_p50, se.run_p95);
+        }
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
