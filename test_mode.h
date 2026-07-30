@@ -116,6 +116,34 @@ rate_verdict_t test_rate_verdict(double p_half, uint32_t n_half,
                                  double p_nom, uint32_t n_nom,
                                  double p_double, uint32_t n_double);
 
+struct test_report_t {
+    // probe parameters
+    int    duration_sec;
+    int    pps;
+    int    pkt_size;
+    double probe_mbps;
+    double app_mbps;
+    char   peer[128];
+    double rtt_ms;
+
+    // rate scan
+    bool           have_rate_scan;
+    double         p_half, p_nom, p_dbl;
+    uint32_t       n_half, n_nom, n_dbl;
+    rate_verdict_t verdict;
+
+    // per-direction recommendations (single port)
+    bool             have_up, have_down;
+    recommendation_t up, down;
+
+    // port-range comparison
+    bool   have_spread;
+    double spread_loss_up;   // loss rate on N ports, up direction
+    int    spread_ports;
+};
+
+void test_render_report(const test_report_t &r);
+
 // ---- entry points ----
 int test_mode_prober_loop();
 int test_mode_responder_loop();

@@ -248,6 +248,105 @@ rate_verdict_t test_rate_verdict(double p_half, uint32_t n_half,
     return RATE_UNCERTAIN;
 }
 
+// ---------------- report rendering ----------------
+static const char *tier_name(int k) {
+    if (k == 0) return "省流";
+    if (k == 1) return "均衡";
+    return "激进";
+}
+
+static void render_tier_row(const tier_t &tr, int k, bool is_default) {
+    if (!tr.feasible) {
+        printf("  %-6s %-8s %-7s %-14s %-9s %s\n",
+               tier_name(k), "-", "-", "目标不可达", "-", "-");
+        return;
+    }
+    char fec[32], ims[16], res[32], ovh[16], bw[24];
+    snprintf(fec, sizeof(fec), "%d:%d", tr.x, tr.y);
+    snprintf(ims, sizeof(ims), "%dms", tr.i_ms);
+    if (tr.extrapolated)
+        snprintf(res, sizeof(res), "<%.4f%%(外推)", tr.residual * 100.0);
+    else
+        snprintf(res, sizeof(res), "%.4f%%", tr.residual * 100.0);
+    snprintf(ovh, sizeof(ovh), "%.0f%%", tr.overhead * 100.0);
+    snprintf(bw, sizeof(bw), "%.2f Mbps", tr.actual_mbps);
+    printf("  %-6s %-8s %-7s %-14s %-9s %s%s\n",
+           tier_name(k), fec, ims, res, ovh, bw, is_default ? "  *" : "");
+}
+
+static void render_direction(const char *label, const recommendation_t &rec) {
+    const trace_stats_t &st = rec.stats;
+    printf("\n--- 链路特征 (%s) ---\n", label);
+    printf("  丢包率               : %.4f%%  (%u/%u)\n",
+           st.loss_rate * 100.0, st.lost_n, st.n);
+    printf("  丢包连长 p50/p95/max : %u / %u / %u\n", st.run_p50, st.run_p95, st.run_max);
+    printf("  突发时长 p95         : %.1f ms\n", st.burst_p95_ms);
+    printf("  本次采样分辨率       : %.4f%%\n", st.resolution * 100.0);
+
+    if (st.lost_n == 0) {
+        printf("\n--- 推荐配置 (%s) ---\n", label);
+        printf("  链路干净(零丢包),--disable-fec 或 -f1:0 即可\n");
+        return;
+    }
+
+    printf("\n--- 推荐配置 (%s) ---\n", label);
+    printf("  档位   %-8s %-7s %-14s %-9s %s\n", "-f", "-i", "预计残余", "冗余开销", "实际占用");
+    const tier_t *tiers[3] = {&rec.thrifty, &rec.balanced, &rec.aggressive};
+    for (int k = 0; k < 3; k++) render_tier_row(*tiers[k], k, k == 1);
+    printf("  * = 默认推荐\n");
+    printf("  注: 残余丢包为 -i 0 的保守回放估计,实际加 -i 后应优于此值\n");
+    printf("  注: 滑窗样本相互重叠,真实置信区间较此估计更宽\n");
+}
+
+void test_render_report(const test_report_t &r) {
+    printf("\n=== UDPspeeder FEC 测试报告 ===\n");
+    printf("探测: 时长 %ds  速率 %dpps  包长 %dB  净荷 %.2f Mbps\n",
+           r.duration_sec, r.pps, r.pkt_size, r.app_mbps);
+    printf("对端: %s   RTT ≈ %.0f ms\n", r.peer, r.rtt_ms);
+
+    if (r.have_rate_scan) {
+        printf("\n--- 丢包性质判定 ---\n");
+        printf("  %5d pps : 丢包 %.4f%%\n", r.pps / 2, r.p_half * 100.0);
+        printf("  %5d pps : 丢包 %.4f%%\n", r.pps, r.p_nom * 100.0);
+        printf("  %5d pps : 丢包 %.4f%%\n", r.pps * 2, r.p_dbl * 100.0);
+        if (r.verdict == RATE_POLICED) {
+            printf("  判定: 限速/拥塞型丢包(丢包随速率显著上升)\n");
+            printf("  警告: FEC 对此类链路无效甚至有害 —— 冗余包会进一步挤占被限速的\n");
+            printf("        管道。正确处方是分流(见 --port-range-mode),而非加大 -f。\n");
+            printf("        以下推荐仅供参考,前提已不成立。\n");
+        } else if (r.verdict == RATE_RANDOM) {
+            printf("  判定: 随机型丢包(与速率无关) → FEC 适用\n");
+        } else {
+            printf("  判定: 不确定(变化不单调或未达显著性),不下结论\n");
+        }
+    }
+
+    if (r.have_up) render_direction("client -> server, 单端口", r.up);
+    if (r.have_down) render_direction("server -> client, 单端口", r.down);
+
+    if (r.have_spread) {
+        printf("\n--- port-range 对比 ---\n");
+        double base = r.have_up ? r.up.stats.loss_rate : 0.0;
+        printf("  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
+               base * 100.0, r.spread_ports, r.spread_loss_up * 100.0);
+        if (base > 0.0 && r.spread_loss_up < base) {
+            printf("  结论: 多端口降低丢包 %.0f%%,port-range 对该链路有效\n",
+                   (base - r.spread_loss_up) / base * 100.0);
+        } else if (base > 0.0 && r.spread_loss_up > base) {
+            printf("  结论: 多端口未降低丢包,port-range 对该链路无收益\n");
+        } else {
+            printf("  结论: 单端口已无丢包,无法判断 port-range 收益\n");
+        }
+    }
+
+    printf("\n--- 建议命令行 ---\n");
+    if (r.have_up && r.up.balanced.feasible)
+        printf("  client: -f%d:%d -i%d\n", r.up.balanced.x, r.up.balanced.y, r.up.balanced.i_ms);
+    if (r.have_down && r.down.balanced.feasible)
+        printf("  server: -f%d:%d -i%d\n", r.down.balanced.x, r.down.balanced.y, r.down.balanced.i_ms);
+    printf("\n");
+}
+
 // ---------------- selftest harness ----------------
 static int g_checks = 0;
 static int g_failures = 0;
@@ -624,6 +723,42 @@ int test_mode_selftest() {
         // zero loss everywhere -> random
         TCHECK(test_rate_verdict(0.0, 2000, 0.0, 2000, 0.0, 2000) == RATE_RANDOM,
                "zero loss must be RATE_RANDOM");
+    }
+
+    // ---- report rendering ----
+    {
+        trace_t t;
+        t.init(2000, 200);
+        for (uint32_t s = 0; s < 2000; s++) {
+            if (s % 50 != 0) t.record(s, 1000000ULL + s * 5000ULL);
+        }
+        test_report_t r;
+        memset(&r, 0, sizeof(r));
+        r.duration_sec = 30; r.pps = 200; r.pkt_size = 1200;
+        r.probe_mbps = 1.92; r.app_mbps = 1.92; r.rtt_ms = 42.0;
+        snprintf(r.peer, sizeof(r.peer), "127.0.0.1:4096");
+        r.have_rate_scan = true;
+        r.p_half = 0.02; r.p_nom = 0.0205; r.p_dbl = 0.0198;
+        r.n_half = r.n_nom = r.n_dbl = 2000;
+        r.verdict = RATE_RANDOM;
+        r.have_up = true;
+        r.up = test_evaluate(t, r.app_mbps, r.pkt_size);
+        r.have_down = false;
+        r.have_spread = false;
+
+        // Reaching the statements after each call is itself the evidence that
+        // rendering returned; do not add a vacuous TCHECK(true, ...) here.
+        printf("---- selftest: sample report begin ----\n");
+        test_render_report(r);
+        printf("---- selftest: sample report end ----\n");
+
+        // infeasible-everything report must render too
+        trace_t t2;
+        t2.init(2000, 200);
+        test_report_t r2 = r;
+        r2.up = test_evaluate(t2, r2.app_mbps, r2.pkt_size);
+        test_render_report(r2);
+        TCHECK(!r2.up.balanced.feasible, "total-loss report must show infeasible tiers");
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
