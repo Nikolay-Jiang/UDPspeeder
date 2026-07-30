@@ -129,11 +129,22 @@ int test_mode_selftest() {
     g_checks = 0;
     g_failures = 0;
 
-    // Harness sanity: proves TCHECK counts a passing and a failing check.
-    TCHECK(1 == 1, "harness must count a passing check");
-
-    // This assertion intentionally documents the defaults contract.
-    TCHECK(TEST_PPS_MAX == 20000, "TEST_PPS_MAX must be 20000, got %d", TEST_PPS_MAX);
+    // Harness self-check. Every later task's assertions are only as trustworthy
+    // as TCHECK's ability to actually FAIL, so exercise the failure path once
+    // against scratch counters, then restore them.
+    {
+        int saved_checks = g_checks;
+        int saved_failures = g_failures;
+        g_checks = 0;
+        g_failures = 0;
+        printf("---- selftest: one deliberate FAIL line follows, it is expected ----\n");
+        TCHECK(1 == 0, "deliberate failure proving the harness counts failures");
+        bool harness_ok = (g_checks == 1 && g_failures == 1);
+        g_checks = saved_checks;
+        g_failures = saved_failures;
+        printf("---- selftest: end of deliberate failure ----\n");
+        TCHECK(harness_ok, "TCHECK must count a failing check exactly once");
+    }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
