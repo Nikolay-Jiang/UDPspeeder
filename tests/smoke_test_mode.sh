@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # smoke_test_mode.sh — end-to-end check for --test-mode
 #
-# Round 1: --test-selftest (pure-function regression, expects 69 checks/0 fail)
+# Round 1: --test-selftest (pure-function regression, expects 75 checks/0 fail)
 # Round 2: loopback probe with no injected loss   -> reported loss < 1%
 # Round 3: loopback probe with --random-drop 1000 (~10% injected) -> reported
 #          loss lands in a 5-16% band (injection is pseudo-random per run, so
-#          we assert a band rather than a point value) and a recommendation
-#          section is still rendered.
+#          we assert a band rather than a point value), a recommendation
+#          section is rendered, and all three tier rows carry a real -f value.
 #
 # Timing note: the rate-scan phase is a fixed 10s x 3 sub-phases regardless of
 # --test-duration/--test-pps, so each prober run takes ~36s minimum. The whole
@@ -118,6 +118,34 @@ assert_is_number() {
     fi
 }
 
+# Every tier row must carry a real "-f x:y" recommendation.
+#
+# A tier whose target could not be met renders "目标不可达" in place of the
+# whole row, so this assertion is what catches the class of bug where a tier
+# never reaches the prober at all and is therefore declared unreachable on
+# every single run -- which is exactly how a report showing the balanced tier
+# meeting its target while the other two rows claimed the link could not reach
+# theirs got past an earlier "推荐配置 appears" check.
+#
+# Only "<digits>:<digits>" can match the -f cell: the residual and overhead
+# cells are percentages, the bandwidth cell is "N.NN Mbps", and -i is "Nms".
+# ~10% isolated loss makes all three targets comfortably feasible, so any
+# "目标不可达" row on this round is a real defect and not a hard link.
+assert_all_tiers_have_fec() {
+    local out="$1" tier row
+    for tier in 省流 均衡 激进; do
+        row=$(echo "$out" | grep -m1 "^  ${tier} ") || true
+        if [[ -z "$row" ]]; then
+            echo "  FAIL: no '${tier}' tier row found in the report"
+            exit 1
+        fi
+        if [[ ! "$row" =~ [0-9]+:[0-9]+ ]]; then
+            echo "  FAIL: '${tier}' tier row carries no -f value: ${row}"
+            exit 1
+        fi
+    done
+}
+
 echo "Round 2: clean loopback (expect <1% loss)"
 start_responder
 OUT2=$(run_prober)
@@ -143,6 +171,8 @@ echo "  [drop] reported loss = ${LOSS3}%"
 awk -v l="$LOSS3" 'BEGIN{ exit !(l > 5.0 && l < 16.0) }' \
     || { echo "  FAIL: injected ~10% but reported ${LOSS3}% (expected band 5-16%)"; exit 1; }
 echo "$OUT3" | grep -q "推荐配置" || { echo "  FAIL: no recommendation section"; exit 1; }
+assert_all_tiers_have_fec "$OUT3"
+echo "  [drop] all three tier rows carry an -f value"
 echo "  [drop] ok"
 echo
 

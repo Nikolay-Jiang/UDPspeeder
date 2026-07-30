@@ -893,6 +893,42 @@ int test_mode_selftest() {
         r2.up = test_evaluate(t2, r2.app_mbps, r2.pkt_size);
         test_render_report(r2);
         TCHECK(!r2.up.balanced.feasible, "total-loss report must show infeasible tiers");
+
+        // Column padding is by display width, not byte length. The
+        // infeasible-row placeholder is 5 CJK glyphs: 15 bytes, 10 columns.
+        // Getting this wrong skews every column to its right in the tier table.
+        TCHECK(test_display_width("目标不可达") == 10,
+               "CJK width must be 2 columns per glyph: expected 10, got %d",
+               test_display_width("目标不可达"));
+        TCHECK(test_display_width("0.0000%") == 7,
+               "ASCII width must equal byte length: expected 7, got %d",
+               test_display_width("0.0000%"));
+        TCHECK(test_display_width("") == 0,
+               "empty string must be 0 columns, got %d", test_display_width(""));
+
+        // Clean-link path. The tier table and the suggested command line used
+        // to disagree here -- the table said "link is clean, --disable-fec or
+        // -f1:0" while the command line printed -f30:0, which is the same zero
+        // redundancy plus pointless group-fill latency. Both now go through
+        // test_link_is_clean, so pin the predicate both of them consult.
+        {
+            trace_t tc;
+            tc.init(2000, 200);
+            for (uint32_t s = 0; s < 2000; s++) tc.record(s, 1000000ULL + s * 5000ULL);
+            recommendation_t clean = test_evaluate(tc, r.app_mbps, r.pkt_size);
+            TCHECK(clean.stats.lost_n == 0, "clean fixture must have zero losses, got %u",
+                   clean.stats.lost_n);
+            TCHECK(test_link_is_clean(clean),
+                   "a zero-loss direction must be reported as a clean link");
+            TCHECK(!test_link_is_clean(r.up),
+                   "a 2%% loss direction must not be reported as a clean link");
+
+            test_report_t rc = r;
+            rc.up = clean;
+            printf("---- selftest: clean-link report begin ----\n");
+            test_render_report(rc);
+            printf("---- selftest: clean-link report end ----\n");
+        }
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
