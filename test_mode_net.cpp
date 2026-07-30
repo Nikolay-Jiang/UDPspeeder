@@ -136,6 +136,73 @@ struct responder_state_t {
 static responder_state_t g_resp;
 static std::vector<int> g_resp_fds;
 
+// ---------------- HELLO / HELLO_ACK payloads ----------------
+//
+// HELLO carries the prober's --data-port-range as {count, first, last}, three
+// big-endian u32s. Spec section 9.2 requires a mismatch to be refused: if only
+// one end has the flag, the S3 probes land on ports nobody is bound to, the
+// responder's trace shows ~100% loss, and the report concludes "multiple ports
+// did not reduce loss, port-range brings no benefit for this link" -- the exact
+// inverse of the truth, produced by the very misconfiguration this catches.
+//
+// HELLO_ACK carries a u32 reject code (0 = accepted) followed by an optional
+// reason string, which the prober prints verbatim.
+static const int TEST_HELLO_PL_LEN = 12;
+
+enum test_reject_t {
+    TEST_REJECT_NONE = 0,
+    TEST_REJECT_PORT_RANGE,
+    TEST_REJECT_VERSION
+};
+
+static void hello_pl_pack(char *out) {
+    int n = port_range_mgr.count();
+    write_u32(out + 0, (u32_t)n);
+    write_u32(out + 4, n > 0 ? (u32_t)port_range_mgr.ports[0] : 0u);
+    write_u32(out + 8, n > 0 ? (u32_t)port_range_mgr.ports[n - 1] : 0u);
+}
+
+// Returns TEST_REJECT_NONE when the peer's range matches ours, else fills
+// `reason` with an operator-facing explanation. count+first+last is enough to
+// separate every realistic misconfiguration (absent on one side, different
+// base, different width) without shipping the whole table.
+static int hello_pl_check(const uint8_t *pl, int pl_len, char *reason, size_t reason_cap) {
+    int n = port_range_mgr.count();
+    u32_t mine_count = (u32_t)n;
+    u32_t mine_first = n > 0 ? (u32_t)port_range_mgr.ports[0] : 0u;
+    u32_t mine_last  = n > 0 ? (u32_t)port_range_mgr.ports[n - 1] : 0u;
+
+    if (pl_len < TEST_HELLO_PL_LEN) {
+        snprintf(reason, reason_cap,
+                 "HELLO payload is %d bytes, expected %d -- the two ends are running "
+                 "different speederv2 builds. use the same build on both.",
+                 pl_len, TEST_HELLO_PL_LEN);
+        return TEST_REJECT_VERSION;
+    }
+
+    u32_t peer_count = read_u32((char *)pl + 0);
+    u32_t peer_first = read_u32((char *)pl + 4);
+    u32_t peer_last  = read_u32((char *)pl + 8);
+    if (peer_count == mine_count && peer_first == mine_first && peer_last == mine_last)
+        return TEST_REJECT_NONE;
+
+    char peer_desc[48], mine_desc[48];
+    if (peer_count == 0) snprintf(peer_desc, sizeof(peer_desc), "no --data-port-range");
+    else snprintf(peer_desc, sizeof(peer_desc), "%u ports (%u-%u)",
+                  peer_count, peer_first, peer_last);
+    if (mine_count == 0) snprintf(mine_desc, sizeof(mine_desc), "no --data-port-range");
+    else snprintf(mine_desc, sizeof(mine_desc), "%u ports (%u-%u)",
+                  mine_count, mine_first, mine_last);
+
+    snprintf(reason, reason_cap,
+             "--data-port-range mismatch: prober has %s, responder has %s. "
+             "pass an identical --data-port-range to both ends, or to neither. "
+             "(left undetected this would send the multi-port probes to unbound "
+             "ports and report port-range as useless.)",
+             peer_desc, mine_desc);
+    return TEST_REJECT_PORT_RANGE;
+}
+
 static void responder_finalize_phase() {
     if (!g_resp.phase_open) return;
     g_resp.phase_open = false;
@@ -204,12 +271,28 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             mylog(log_info, "test: rejecting concurrent session from %s\n", src.get_str());
             return;
         }
+        char reason[512];
+        reason[0] = 0;
+        int reject = hello_pl_check(pl, pl_len, reason, sizeof(reason));
+        if (reject != TEST_REJECT_NONE) {
+            // Refuse without activating: a mismatched peer must not be able to
+            // pin the session, and must be told why rather than left to time out.
+            char ack[4 + sizeof(reason)];
+            write_u32(ack, (u32_t)reject);
+            int rlen = (int)strlen(reason);
+            memcpy(ack + 4, reason, (size_t)rlen);
+            mylog(log_warn, "test: refusing session from %s: %s\n", src.get_str(), reason);
+            responder_send(w->fd, src, TEST_HELLO_ACK, 0, ack, 4 + rlen);
+            return;
+        }
         g_resp.active = true;
         g_resp.peer = src;
         g_resp.phase_open = false;
         g_resp.last_rx_us = get_current_time_us();
         mylog(log_info, "test: session from %s\n", src.get_str());
-        responder_send(w->fd, src, TEST_HELLO_ACK, 0, NULL, 0);
+        char ack[4];
+        write_u32(ack, (u32_t)TEST_REJECT_NONE);
+        responder_send(w->fd, src, TEST_HELLO_ACK, 0, ack, sizeof(ack));
 
     } else if (mt == TEST_PHASE_BEGIN) {
         if (pl_len < 12) return;
@@ -561,7 +644,13 @@ int test_mode_prober_loop() {
     }
     g_pr.peer = remote_addr;
 
-    if (!prober_exchange(TEST_HELLO, 0, NULL, 0, TEST_HELLO_ACK, 1000, 10, NULL, NULL)) {
+    char hello_pl[TEST_HELLO_PL_LEN];
+    hello_pl_pack(hello_pl);
+
+    uint8_t ack_pl[640];
+    int ack_len = (int)sizeof(ack_pl);
+    if (!prober_exchange(TEST_HELLO, 0, hello_pl, sizeof(hello_pl),
+                          TEST_HELLO_ACK, 1000, 10, ack_pl, &ack_len)) {
         // A wrong -k is dropped silently by the responder (it only logs
         // locally), so from here a bad key and a blocked/unreachable port
         // are indistinguishable -- name both causes rather than guessing.
@@ -571,6 +660,23 @@ int test_mode_prober_loop() {
               "                       (2) -k does not match on both sides (a wrong key is\n"
               "                           dropped silently by the responder; check its log).\n",
               g_pr.peer.get_str());
+        myexit(-1);
+    }
+    if (ack_len >= 4 && read_u32((char *)ack_pl) != (u32_t)TEST_REJECT_NONE) {
+        // Print the responder's reason verbatim rather than letting this look
+        // like a timeout. The reason is only reachable by a peer that already
+        // holds -k, but it still reaches a terminal, so strip anything that is
+        // not printable ASCII instead of forwarding escape sequences.
+        char reason[640];
+        int rlen = ack_len - 4;
+        if (rlen > (int)sizeof(reason) - 1) rlen = (int)sizeof(reason) - 1;
+        for (int k = 0; k < rlen; k++) {
+            unsigned char c = ack_pl[4 + k];
+            reason[k] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+        }
+        reason[rlen] = 0;
+        mylog(log_fatal, "test: responder refused the session.\n"
+                         "      reason: %s\n", reason);
         myexit(-1);
     }
     mylog(log_info, "test: responder reachable, RTT %.0f ms\n", g_pr.rtt_us / 1000.0);

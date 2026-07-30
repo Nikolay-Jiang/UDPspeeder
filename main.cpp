@@ -99,7 +99,11 @@ static void print_help() {
     printf("                                          and exit; no network involved.\n");
     printf("    --data-port-range     a-b             optional, same flag as above: when set on both sides, also probes\n");
     printf("                                          upstream traffic spread across the n ports and reports whether\n");
-    printf("                                          port-range mode would reduce loss on this link.\n");
+    printf("                                          port-range mode would reduce loss on this link. it must be\n");
+    printf("                                          identical on both ends (or absent from both); a mismatch is\n");
+    printf("                                          detected during the handshake and the session is refused.\n");
+    printf("      NOTE: --test-pps x --test-duration must not exceed 500000 probes per phase; the\n");
+    printf("            combination is validated at startup.\n");
     printf("      NOTE: only the client -> server direction is measured; the report has no\n");
     printf("            server -> client section. total runtime is the fixed 30s rate scan plus one\n");
     printf("            --test-duration pass, plus a second --test-duration pass if --data-port-range\n");

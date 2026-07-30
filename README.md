@@ -200,6 +200,18 @@ N-port upstream loss. It is the same flag documented under
 [Port-Range Mode](#port-range-mode-defeat-per-flow-isp-rate-limiting) above;
 `--port-range-mode` itself is not required in test mode.
 
+The range must be **identical on both ends, or absent from both**. The
+handshake compares them and the responder refuses the session with an
+explicit reason if they disagree — otherwise the multi-port probes would land
+on ports nobody is bound to and the report would confidently conclude that
+port-range brings no benefit, which is the opposite of what such a run shows.
+
+`--test-pps × --test-duration` must not exceed **500,000 probes per phase**;
+the combination is checked at startup. The responder evaluates a phase
+synchronously, and larger traces push that past the prober's
+result-collection timeout. 500,000 samples already resolve loss to 0.0002%,
+far finer than the tightest recommendation tier needs.
+
 | Option | Default | Range | Meaning |
 |---|---|---|---|
 | `--test-duration <sec>` | 30 | 1–600 | duration of each full-length measurement pass |
