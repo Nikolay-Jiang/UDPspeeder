@@ -410,15 +410,10 @@ static int g_failures = 0;
         }                                            \
     } while (0)
 
-// placeholder loops, implemented in later tasks
+// placeholder loop, implemented in Task 9. The responder loop lives in
+// test_mode_net.cpp (Task 8).
 int test_mode_prober_loop() {
     mylog(log_fatal, "test-mode prober not implemented yet\n");
-    myexit(-1);
-    return 0;
-}
-
-int test_mode_responder_loop() {
-    mylog(log_fatal, "test-mode responder not implemented yet\n");
     myexit(-1);
     return 0;
 }

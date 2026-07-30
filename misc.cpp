@@ -1027,6 +1027,16 @@ void process_arg(int argc, char *argv[]) {
             mylog(log_fatal, "--test-mode server requires -l <listen_ip:port>\n");
             myexit(-1);
         }
+        // Applies to both roles: the responder binds one socket per parsed
+        // port, and the prober (Task 9) needs the same parsed list for its
+        // multi-port comparison phase. Without this, --data-port-range would
+        // set the string but leave port_range_mgr empty in test mode.
+        if (data_port_range_str[0] != 0) {
+            if (port_range_mgr.parse_range(data_port_range_str) != 0)
+                myexit(-1);
+            mylog(log_info, "--test-mode: data-port-range=%s (%d ports)\n",
+                  data_port_range_str, port_range_mgr.count());
+        }
     }
 
     int ret = g_fec_par.rs_from_str(rs_par_str);
