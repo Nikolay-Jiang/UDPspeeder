@@ -913,7 +913,9 @@ recommendation_t test_evaluate(const trace_t &t, double app_mbps, int pkt_size);
         }
         trace_stats_t st = trace_analyze(t);
         tier_t bal = test_pick_tier(t, st, TIER_BALANCED_TARGET);
-        TCHECK(bal.feasible, "balanced tier must be feasible on isolated 2% loss");
+        // NOTE: escape the percent as %% — a bare "2% loss" makes printf parse
+        // %lo (unsigned long octal) and consume a nonexistent argument.
+        TCHECK(bal.feasible, "balanced tier must be feasible on isolated 2%% loss");
         TCHECK(bal.residual <= TIER_BALANCED_TARGET,
                "balanced residual %f must meet target", bal.residual);
         TCHECK(bal.y >= 1, "balanced tier must use redundancy, got y=%d", bal.y);
