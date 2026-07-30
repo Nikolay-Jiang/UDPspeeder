@@ -178,6 +178,14 @@ struct test_report_t {
 
 void test_render_report(const test_report_t &r);
 
+// True when a direction saw zero loss. Consulted by both the recommendation
+// table and the suggested-command-line summary so the two cannot disagree.
+bool test_link_is_clean(const recommendation_t &rec);
+
+// Display width in terminal columns (CJK glyphs count as 2), used for the
+// report's column padding.
+int test_display_width(const char *s);
+
 // ---- entry points ----
 int test_mode_prober_loop();
 int test_mode_responder_loop();

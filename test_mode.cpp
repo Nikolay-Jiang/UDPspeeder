@@ -308,7 +308,7 @@ static const char *tier_name(int k) {
 // columns, so byte-padding skews any column whose content is sometimes CJK and
 // sometimes ASCII -- which is exactly the residual column ("0.0000%" vs
 // "目标不可达"). Pad by display width instead.
-static int test_display_width(const char *s) {
+int test_display_width(const char *s) {
     int w = 0;
     const unsigned char *p = (const unsigned char *)s;
     while (*p) {
@@ -373,6 +373,15 @@ static void render_tier_row(const tier_t &tr, int k, bool is_default, double res
     printf("\n");
 }
 
+// Single source of truth for "this direction saw no loss at all". Both the
+// per-direction recommendation table and the 建议命令行 summary consult it, so
+// they cannot disagree: previously the table said "link is clean, use
+// --disable-fec or -f1:0" while the summary printed -f30:0, which means the
+// same zero redundancy but adds group-fill latency for no benefit.
+const char *TEST_CLEAN_LINK_ADVICE = "链路干净(零丢包),--disable-fec 或 -f1:0 即可";
+
+bool test_link_is_clean(const recommendation_t &rec) { return rec.stats.lost_n == 0; }
+
 static void render_direction(const char *label, const recommendation_t &rec) {
     const trace_stats_t &st = rec.stats;
     printf("\n--- 链路特征 (%s) ---\n", label);
@@ -382,9 +391,9 @@ static void render_direction(const char *label, const recommendation_t &rec) {
     printf("  突发时长 p95         : %.1f ms\n", st.burst_p95_ms);
     printf("  本次采样分辨率       : %.4f%%\n", st.resolution * 100.0);
 
-    if (st.lost_n == 0) {
+    if (test_link_is_clean(rec)) {
         printf("\n--- 推荐配置 (%s) ---\n", label);
-        printf("  链路干净(零丢包),--disable-fec 或 -f1:0 即可\n");
+        printf("  %s\n", TEST_CLEAN_LINK_ADVICE);
         return;
     }
 
@@ -456,10 +465,20 @@ void test_render_report(const test_report_t &r) {
     }
 
     printf("\n--- 建议命令行 ---\n");
-    if (r.have_up && r.up.balanced.feasible)
-        printf("  client: -f%d:%d -i%d\n", r.up.balanced.x, r.up.balanced.y, r.up.balanced.i_ms);
-    if (r.have_down && r.down.balanced.feasible)
-        printf("  server: -f%d:%d -i%d\n", r.down.balanced.x, r.down.balanced.y, r.down.balanced.i_ms);
+    if (r.have_up) {
+        if (test_link_is_clean(r.up))
+            printf("  client: %s\n", TEST_CLEAN_LINK_ADVICE);
+        else if (r.up.balanced.feasible)
+            printf("  client: -f%d:%d -i%d\n",
+                   r.up.balanced.x, r.up.balanced.y, r.up.balanced.i_ms);
+    }
+    if (r.have_down) {
+        if (test_link_is_clean(r.down))
+            printf("  server: %s\n", TEST_CLEAN_LINK_ADVICE);
+        else if (r.down.balanced.feasible)
+            printf("  server: -f%d:%d -i%d\n",
+                   r.down.balanced.x, r.down.balanced.y, r.down.balanced.i_ms);
+    }
     printf("\n");
 }
 
