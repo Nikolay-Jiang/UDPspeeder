@@ -90,9 +90,13 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         return;
     }
 
-    // Source pinning: once a session exists, only its peer may drive it.
-    if (g_resp.active && mt != TEST_HELLO && !(src == g_resp.peer)) {
-        mylog(log_debug, "test: ignoring %d from non-session source %s\n", mt, src.get_str());
+    // Every session must start with HELLO. Without this, a peer holding the key
+    // could drive PHASE_BEGIN/PROBE/REQUEST_RESULT with no handshake and no
+    // pinning, letting two such peers clobber each other's in-flight trace.
+    // Design doc section 9.3 requires source pinning and a single active session.
+    if (mt != TEST_HELLO && (!g_resp.active || !(src == g_resp.peer))) {
+        mylog(log_debug, "test: ignoring msg_type %d from %s (no active session, or not the pinned peer)\n",
+              mt, src.get_str());
         return;
     }
 
