@@ -287,9 +287,16 @@ static bool prober_exchange(int msg_type, int phase, const void *payload, int pa
             int mt = test_decode(buf, len, &h, &pl, &pl_len);
             if (mt != want_type) continue;
             g_pr.rtt_us = get_current_time_us() - t0;
-            if (out_payload && out_payload_len && pl_len > 0) {
+            if (out_payload && out_payload_len) {
+                // Always assign *out_payload_len, including the zero case: it
+                // is the caller's capacity on entry (e.g. sizeof(wire)), and a
+                // caller that checks "did I get a full-size reply?" against a
+                // stale capacity value -- rather than the actual received
+                // length -- would validate uninitialized memory as if it were
+                // a real payload.
                 int cp = pl_len < *out_payload_len ? pl_len : *out_payload_len;
-                memcpy(out_payload, pl, (size_t)cp);
+                if (cp < 0) cp = 0;
+                if (cp > 0) memcpy(out_payload, pl, (size_t)cp);
                 *out_payload_len = cp;
             }
             return true;
@@ -333,9 +340,23 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
     while (sent < total) {
         next_tick += 1000;   // 1ms
         my_time_t now = get_current_time_us();
-        if (next_tick > now) usleep((useconds_t)(next_tick - now));
+        if (next_tick > now) {
+            usleep((useconds_t)(next_tick - now));
+        } else if (now - next_tick > 50000) {
+            // Fell >50ms behind (load spike, vm pause). Re-base rather than
+            // free-run: without this the loop stops sleeping and releases the
+            // whole backlog as a burst, manufacturing the time-correlated loss
+            // that the -i recommendation is measured from. Stretching the phase
+            // is harmless -- the responder waits for PHASE_END, not a clock --
+            // whereas dropping probes would be counted as loss.
+            mylog(log_warn, "test: pacing slipped %llu ms behind, phase will run long\n",
+                  (unsigned long long)((now - next_tick) / 1000));
+            next_tick = now;
+        }
 
         acc += per_tick;
+        // Cap banked credit so one tick cannot emit a long backlog at once.
+        if (acc > per_tick + 1.0) acc = per_tick + 1.0;
         while (acc >= 1.0 && sent < total) {
             acc -= 1.0;
             const address_t &d = dests[rr % dests.size()];
