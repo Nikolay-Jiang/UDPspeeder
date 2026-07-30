@@ -78,10 +78,10 @@ static void print_help() {
     printf("    --hello-retry-max     <sec>           (client) max handshake retry backoff, default: 30.\n");
     printf("    --heartbeat-interval  <sec>           control-plane heartbeat interval, default: 5.\n");
     printf("    --heartbeat-loss-threshold <n>        missed heartbeats before re-handshake, default: 3.\n");
-    printf("      NOTE: the client must NOT sit behind a symmetric nat. a symmetric nat assigns a different\n");
-    printf("            external source port per destination port, so the server sees one client as N separate\n");
-    printf("            connections -- upstream sessions become unstable and per-connection overhead multiplies.\n");
-    printf("            public clients and cone nats (full-cone / restricted / port-restricted) are fine.\n");
+    printf("      NOTE: in port-range mode the server identifies a client by source ip only (the source port\n");
+    printf("            is ignored), so clients behind a symmetric nat work. the trade-off is that only ONE\n");
+    printf("            client per public ip is supported -- two clients sharing an ip collapse into one\n");
+    printf("            session. use a separate ip, or a separate server instance, for each client.\n");
 
     printf("log and help options:\n");
     printf("    --log-level           <number>        0: never    1: fatal   2: error   3: warn \n");

@@ -117,13 +117,11 @@ Data packets still use the same on-wire format (obscure, XOR, FEC, etc.); only t
 
 #### Limitations
 
-**The client must not sit behind a symmetric NAT.** Port-range mode identifies a client on the server purely by the datagram's source address `(ip, port)` — the data plane carries no session id. A symmetric NAT assigns a *different* external source port for each distinct destination port, so a single client sending to N data ports appears to the server as N different source addresses, i.e. **N separate connections** for one logical client. The consequences:
+**Only one client per public IP address.** The data plane carries no session id, so in port-range mode the server identifies a client by its source **IP only**, ignoring the source port. Two distinct clients sharing one public IP would therefore collapse into a single connection — mixing their FEC sequence streams into one decoder and their NAT endpoints into one reply set. Give each client its own public IP, or run separate server instances on separate control ports.
 
-- The upstream `-r` target sees the same logical flow arrive from N alternating source ports, which breaks stateful applications (VPNs, game servers) that track a client by its source port.
-- Each of the N connections runs its own FEC encoder / sequence numbering feeding the client's single decoder, causing reordering and anti-replay drops.
-- Per-connection state and timers multiply by N.
+Ignoring the source port is what makes **symmetric NAT** work. A symmetric NAT assigns a *different* external source port per destination port, so a client sending to N data ports arrives from N different source addresses. Keying on `(ip, port)` would split that one logical client into N separate connections — fragmenting its FEC groups across N decoders and opening N sockets to the `-r` target, which breaks stateful applications (a TLS handshake would see N apparent clients and never converge). Keying on the IP alone collapses those back into one session; the true per-port source address is tracked separately and used for replies, so return traffic still follows each NAT mapping correctly.
 
-Deployments where the client is **public** or behind a **cone NAT** (full-cone / restricted-cone / port-restricted-cone) are unaffected — those keep one external source port per client, so the server sees exactly one connection. This is the common case for a VPS client or a typical home router. Only *symmetric* NAT (some carrier-grade / enterprise NATs) triggers the fragmentation. Proper session-id-based data-plane routing that would lift this restriction is planned for a future revision.
+Public clients, cone NATs (full-cone / restricted-cone / port-restricted-cone), and symmetric / carrier-grade NATs are therefore all supported. Session-id-based data-plane routing, which would also lift the one-client-per-IP restriction, is planned for a future revision.
 
 #### Example
 

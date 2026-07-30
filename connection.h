@@ -271,6 +271,9 @@ struct conn_info_t : not_copy_able_t  // stores info for a raw connection.for cl
         my_time_t now = get_current_time_us();
         for (auto &ep : active_endpoints) {
             if (ep.fd_idx == fd_idx) {
+                // refresh addr too: a symmetric nat can rebind this mapping to a new
+                // external port, and replies must follow it or they hit a dead one.
+                ep.addr = src;
                 ep.last_seen_us = now;
                 return;
             }

@@ -196,14 +196,23 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
             continue;
         }
 
-        if (!conn_manager.exist(addr)) {
+        // Session key. In port-range mode the client sprays one stream across N
+        // destination ports; a symmetric nat then hands out a different external
+        // source port per destination port, so keying on (ip,port) would split one
+        // client into up to N conn_info objects -- fragmenting its fec groups across
+        // N decoders and opening N sockets to '-r'. Key on client ip only. The true
+        // per-fd source address is kept in active_endpoints and used for replies.
+        address_t conn_key = addr;
+        if (port_range_mode) conn_key.set_port(0);
+
+        if (!conn_manager.exist(conn_key)) {
             if (conn_manager.mp.size() >= max_conn_num) {
                 mylog(log_warn, "new connection %s ignored bc max_conn_num exceed\n", addr.get_str());
                 continue;
             }
 
-            conn_info_t &new_conn_info = conn_manager.find_insert(addr);
-            new_conn_info.addr = addr;
+            conn_info_t &new_conn_info = conn_manager.find_insert(conn_key);
+            new_conn_info.addr = conn_key;
             new_conn_info.loop = ev_default_loop(0);
             new_conn_info.local_listen_fd = local_listen_fd;
 
@@ -218,7 +227,7 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
             mylog(log_info, "new connection from %s\n", addr.get_str());
         }
 
-        conn_info_t &conn_info = conn_manager.find_insert(addr);
+        conn_info_t &conn_info = conn_manager.find_insert(conn_key);
         conn_info.update_active_time();
 
         if (port_range_mode) {
@@ -259,7 +268,9 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
                 fd64_t fd64 = fd_manager.create(new_udp_fd);
 
                 conn_info.conv_manager.s.insert_conv(conv, fd64);
-                fd_manager.get_info(fd64).addr = addr;
+                // must be the conn_manager key: server_clear_function() looks the
+                // conn_info back up by this address when the conv expires.
+                fd_manager.get_info(fd64).addr = conn_key;
 
                 ev_io &io_watcher = fd_manager.get_info(fd64).io_watcher;
                 io_watcher.u64 = fd64;
