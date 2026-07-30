@@ -1270,10 +1270,45 @@ static const char *tier_name(int k) {
     return "激进";
 }
 
+// printf's %-Ns pads by BYTES, but a UTF-8 CJK glyph is 3 bytes and 2 display
+// columns. The residual column holds ASCII ("0.0000%") on feasible rows and CJK
+// ("目标不可达") on infeasible ones, so NO byte-width choice can align this
+// table -- do not try to tune %-Ns values. Pad by display width instead.
+static int test_display_width(const char *s) {
+    int w = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        if (*p < 0x80) {
+            p += 1;
+            w += 1;
+        } else {
+            int len = (*p >= 0xf0) ? 4 : (*p >= 0xe0) ? 3 : 2;
+            w += (len >= 3) ? 2 : 1;  // every non-ASCII glyph here is CJK
+            p += len;
+        }
+    }
+    return w;
+}
+
+// Print s left-aligned in a field of `cols` display columns, then one separator
+// space. `last` omits both padding and separator.
+static void test_print_cell(const char *s, int cols, bool last) {
+    fputs(s, stdout);
+    if (last) return;
+    for (int k = test_display_width(s); k < cols; k++) putchar(' ');
+    putchar(' ');
+}
+
+// Column display widths, used identically by the header and both row kinds.
+static const int TIER_COL_W[5] = {4, 8, 7, 14, 9};
+
 static void render_tier_row(const tier_t &tr, int k, bool is_default) {
+    printf("  ");
     if (!tr.feasible) {
-        printf("  %-6s %-8s %-7s %-14s %-9s %s\n",
-               tier_name(k), "-", "-", "目标不可达", "-", "-");
+        const char *cells[6] = {tier_name(k), "-", "-", "目标不可达", "-", "-"};
+        for (int c = 0; c < 6; c++)
+            test_print_cell(cells[c], c < 5 ? TIER_COL_W[c] : 0, c == 5);
+        printf("\n");
         return;
     }
     char fec[32], ims[16], res[32], ovh[16], bw[24];
@@ -1285,8 +1320,10 @@ static void render_tier_row(const tier_t &tr, int k, bool is_default) {
         snprintf(res, sizeof(res), "%.4f%%", tr.residual * 100.0);
     snprintf(ovh, sizeof(ovh), "%.0f%%", tr.overhead * 100.0);
     snprintf(bw, sizeof(bw), "%.2f Mbps", tr.actual_mbps);
-    printf("  %-6s %-8s %-7s %-14s %-9s %s%s\n",
-           tier_name(k), fec, ims, res, ovh, bw, is_default ? "  *" : "");
+    const char *cells[6] = {tier_name(k), fec, ims, res, ovh, bw};
+    for (int c = 0; c < 6; c++)
+        test_print_cell(cells[c], c < 5 ? TIER_COL_W[c] : 0, c == 5);
+    printf("%s\n", is_default ? "  *" : "");
 }
 
 static void render_direction(const char *label, const recommendation_t &rec) {
@@ -1305,7 +1342,16 @@ static void render_direction(const char *label, const recommendation_t &rec) {
     }
 
     printf("\n--- 推荐配置 (%s) ---\n", label);
-    printf("  档位   %-8s %-7s %-14s %-9s %s\n", "-f", "-i", "预计残余", "冗余开销", "实际占用");
+    // Header goes through the SAME display-width cell printer and the SAME
+    // TIER_COL_W widths as both row kinds. Any hardcoded spacing here skews the
+    // whole header against the values it labels.
+    {
+        const char *hdr[6] = {"档位", "-f", "-i", "预计残余", "冗余开销", "实际占用"};
+        printf("  ");
+        for (int c = 0; c < 6; c++)
+            test_print_cell(hdr[c], c < 5 ? TIER_COL_W[c] : 0, c == 5);
+        printf("\n");
+    }
     const tier_t *tiers[3] = {&rec.thrifty, &rec.balanced, &rec.aggressive};
     for (int k = 0; k < 3; k++) render_tier_row(*tiers[k], k, k == 1);
     printf("  * = 默认推荐\n");
