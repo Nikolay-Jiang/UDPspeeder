@@ -7,6 +7,7 @@
 
 #include "misc.h"
 #include "control_proto.h"
+#include "test_mode.h"
 
 char fifo_file[1000] = "";
 
@@ -62,6 +63,13 @@ char data_port_range_str[64] = "";
 port_range_manager_t port_range_mgr;
 
 int tun_mtu = 1500;
+
+// test-mode globals
+int    test_mode = 0;
+int    test_duration_sec = 30;
+int    test_pps = 200;
+int    test_pkt_size = 1200;
+double test_app_mbps = 0.0;  // 0 => derive from probe rate
 
 int mssfix = default_mtu;
 
@@ -606,6 +614,11 @@ void process_arg(int argc, char *argv[]) {
             {"hello-retry-max", required_argument, 0, 1},
             {"heartbeat-interval", required_argument, 0, 1},
             {"heartbeat-loss-threshold", required_argument, 0, 1},
+            {"test-mode", no_argument, 0, 1},
+            {"test-duration", required_argument, 0, 1},
+            {"test-pps", required_argument, 0, 1},
+            {"test-pkt-size", required_argument, 0, 1},
+            {"test-app-mbps", required_argument, 0, 1},
             {NULL, 0, 0, 0}};
     int option_index = 0;
     assert(g_fec_par.rs_from_str(rs_par_str) == 0);
@@ -614,6 +627,9 @@ void process_arg(int argc, char *argv[]) {
         if (strcmp(argv[i], "--unit-test") == 0) {
             unit_test();
             myexit(0);
+        }
+        if (strcmp(argv[i], "--test-selftest") == 0) {
+            myexit(test_mode_selftest());
         }
     }
 
@@ -826,6 +842,35 @@ void process_arg(int argc, char *argv[]) {
                         mylog(log_fatal, "--heartbeat-loss-threshold must be >= 1\n");
                         myexit(-1);
                     }
+                } else if (strcmp(long_options[option_index].name, "test-mode") == 0) {
+                    test_mode = 1;
+                    working_mode = test_working_mode;
+                    mylog(log_info, "test_mode enabled\n");
+                } else if (strcmp(long_options[option_index].name, "test-duration") == 0) {
+                    sscanf(optarg, "%d", &test_duration_sec);
+                    if (test_duration_sec < 1 || test_duration_sec > TEST_DURATION_MAX) {
+                        mylog(log_fatal, "--test-duration must be 1-%d\n", TEST_DURATION_MAX);
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "test-pps") == 0) {
+                    sscanf(optarg, "%d", &test_pps);
+                    if (test_pps < 1 || test_pps > TEST_PPS_MAX) {
+                        mylog(log_fatal, "--test-pps must be 1-%d\n", TEST_PPS_MAX);
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "test-pkt-size") == 0) {
+                    sscanf(optarg, "%d", &test_pkt_size);
+                    if (test_pkt_size < TEST_PKT_SIZE_MIN || test_pkt_size > TEST_PKT_SIZE_MAX) {
+                        mylog(log_fatal, "--test-pkt-size must be %d-%d\n",
+                              TEST_PKT_SIZE_MIN, TEST_PKT_SIZE_MAX);
+                        myexit(-1);
+                    }
+                } else if (strcmp(long_options[option_index].name, "test-app-mbps") == 0) {
+                    sscanf(optarg, "%lf", &test_app_mbps);
+                    if (test_app_mbps < 0.0) {
+                        mylog(log_fatal, "--test-app-mbps must be >= 0\n");
+                        myexit(-1);
+                    }
                 } else if (strcmp(long_options[option_index].name, "delay-capacity") == 0) {
                     sscanf(optarg, "%d", &delay_capacity);
 
@@ -964,6 +1009,22 @@ void process_arg(int argc, char *argv[]) {
             myexit(-1);
         } else if (program_mode == server_mode && no_l) {
             mylog(log_fatal, "error: -l not found\n");
+            myexit(-1);
+        }
+    }
+
+    if (working_mode == test_working_mode) {
+        if (strlen(key_string) == 0) {
+            mylog(log_fatal, "--test-mode requires -k (mandatory: probes are MAC-authenticated "
+                             "to prevent this responder being used as a UDP reflector)\n");
+            myexit(-1);
+        }
+        if (program_mode == client_mode && !remote_addr.is_vaild()) {
+            mylog(log_fatal, "--test-mode client requires -r <responder_ip:port>\n");
+            myexit(-1);
+        }
+        if (program_mode == server_mode && !local_addr.is_vaild()) {
+            mylog(log_fatal, "--test-mode server requires -l <listen_ip:port>\n");
             myexit(-1);
         }
     }

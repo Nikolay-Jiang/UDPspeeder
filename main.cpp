@@ -9,6 +9,7 @@
 #include "fec_manager.h"
 #include "misc.h"
 #include "tunnel.h"
+#include "test_mode.h"
 //#include "tun_dev.h"
 #include "git_version.h"
 using namespace std;
@@ -153,7 +154,13 @@ int main(int argc, char *argv[]) {
         sprintf(tun_dev, "tun%u", get_fake_random_number() % 1000);
     }
 
-    if (program_mode == client_mode) {
+    if (working_mode == test_working_mode) {
+        if (program_mode == client_mode) {
+            test_mode_prober_loop();
+        } else {
+            test_mode_responder_loop();
+        }
+    } else if (program_mode == client_mode) {
         tunnel_client_event_loop();
     } else {
         tunnel_server_event_loop();

@@ -135,7 +135,8 @@ extern unordered_map<int, const char *> raw_mode_tostring;
 
 enum working_mode_t { unset_working_mode = 0,
                       tunnel_mode,
-                      tun_dev_mode };
+                      tun_dev_mode,
+                      test_working_mode };
 extern working_mode_t working_mode;
 
 extern int socket_buf_size;
