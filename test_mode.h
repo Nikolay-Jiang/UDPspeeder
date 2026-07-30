@@ -163,6 +163,13 @@ struct test_report_t {
     bool             have_up, have_down;
     recommendation_t up, down;
 
+    // Probes the local stack refused to send (ENOBUFS/EWOULDBLOCK etc.),
+    // summed over every phase. These are counted as lost by the responder but
+    // are local backpressure, not link loss, so the report flags them rather
+    // than silently adjusting the loss figure.
+    uint32_t send_fail_n;
+    uint32_t send_total_n;
+
     // port-range comparison
     bool   have_spread;
     double spread_loss_up;   // loss rate on N ports, up direction

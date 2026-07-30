@@ -430,6 +430,11 @@ struct prober_ctx_t {
     int           pkt_size = 0;
     trace_stats_t result_stats;
     tier_t        result_tiers[TEST_RESULT_NTIERS];
+    // Probes rejected by the local stack. Reset per phase, accumulated for the
+    // report; see the note on test_report_t::send_fail_n.
+    uint32_t      phase_send_fail = 0;
+    uint32_t      run_send_fail = 0;
+    uint32_t      run_send_total = 0;
 };
 
 static prober_ctx_t g_pr;
@@ -452,10 +457,15 @@ static int prober_sendto(int msg_type, int phase, uint32_t seq,
     address_t d = dst;
     int ret = (int)sendto(g_pr.fd, out, n, 0, (struct sockaddr *)&d.inner, d.get_len());
     if (ret < 0) {
-        // Not fatal: at probe pps this can be a transient local buffer-full
-        // condition, which is itself a form of loss and gets reflected in the
-        // trace like any other dropped probe. Control messages are covered by
-        // prober_exchange's retry loop.
+        // Not fatal, but not link loss either: the socket is non-blocking, so
+        // at high pps this is usually a full send buffer (ENOBUFS/EWOULDBLOCK),
+        // i.e. LOCAL backpressure. The responder still counts the sequence
+        // number as lost, so the measurement is overstated by exactly these.
+        // Count them so the report can say so. Deliberately not subtracted from
+        // the loss figure: surfacing the caveat is honest, quietly adjusting a
+        // number the responder actually measured is not. Control messages are
+        // covered by prober_exchange's retry loop and are not counted here.
+        if (msg_type == TEST_PROBE) g_pr.phase_send_fail++;
         mylog(log_debug, "test: sendto(%s) failed: %s\n", d.get_str(), get_sock_error());
     }
     return ret;
@@ -537,6 +547,7 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
     mylog(log_info, "test: phase %d running -- %u pps x %ds (%u probes) to %d port(s)\n",
           phase, pps, duration_sec, total, (int)dests.size());
 
+    g_pr.phase_send_fail = 0;
     double per_tick = (double)pps / 1000.0;
     double acc = 0.0;
     uint32_t sent = 0;
@@ -581,6 +592,15 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
                 next_progress += progress_step;
             }
         }
+    }
+
+    g_pr.run_send_fail  += g_pr.phase_send_fail;
+    g_pr.run_send_total += total;
+    if (g_pr.phase_send_fail > 0) {
+        mylog(log_warn, "test: phase %d -- %u/%u probes were refused by the local "
+                        "socket (send buffer full?); the responder counts them as "
+                        "lost, so this phase's loss is overstated\n",
+              phase, g_pr.phase_send_fail, total);
     }
 
     // Grace period to drain in-flight probes before the responder finalizes.
@@ -747,6 +767,9 @@ int test_mode_prober_loop() {
     }
 
     prober_sendto(TEST_BYE, 0, 0, NULL, 0, g_pr.peer, 0);
+
+    rep.send_fail_n  = g_pr.run_send_fail;
+    rep.send_total_n = g_pr.run_send_total;
 
     test_render_report(rep);
     return 0;

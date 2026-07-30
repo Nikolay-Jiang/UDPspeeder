@@ -410,6 +410,16 @@ void test_render_report(const test_report_t &r) {
            r.duration_sec, r.pps, r.pkt_size, r.app_mbps);
     printf("对端: %s   RTT ≈ %.0f ms\n", r.peer, r.rtt_ms);
 
+    if (r.send_fail_n > 0) {
+        // Local backpressure, not link loss -- but the responder counted it as
+        // loss, so say so instead of quietly correcting a measured number.
+        printf("\n--- 警告: 本地发送失败 ---\n");
+        printf("  本次有 %u/%u 个探测包未能发出(本地发送缓冲区满等)。\n",
+               r.send_fail_n, r.send_total_n);
+        printf("  对端会把它们计为丢包,因此下方实测丢包率可能被高估;\n");
+        printf("  这部分并非链路丢包。降低 --test-pps 后重测可排除该因素。\n");
+    }
+
     if (r.have_rate_scan) {
         printf("\n--- 丢包性质判定 ---\n");
         printf("  %5d pps : 丢包 %.4f%%\n", r.pps / 2, r.p_half * 100.0);
