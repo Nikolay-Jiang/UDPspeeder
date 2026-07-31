@@ -238,6 +238,9 @@ struct test_report_t {
     bool   have_spread;
     double spread_loss_up;   // loss rate on N ports, up direction
     int    spread_ports;
+    bool   have_spread_down;
+    double spread_loss_down;
+    int    spread_ports_down;   // ports that actually carried traffic, may be < N
 };
 
 void test_render_report(const test_report_t &r);

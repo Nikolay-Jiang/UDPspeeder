@@ -592,10 +592,38 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             g_rev.pps    = pps;
             g_rev.last_peer_rx_us = get_current_time_us();
             g_rev.pacer.init((double)pps, get_current_time_us());
-            // Task 6 fills this from g_data_eps when spread != 0. Single-port
-            // reverse always answers on the control fd, to the pinned peer.
-            g_rev.fds.push_back(g_resp_fds[0]);
-            g_rev.dsts.push_back(g_resp.peer);
+            if (spread != 0 && g_data_eps.size() > 1) {
+                // Each data fd replies to the address IT saw during S3. Under a
+                // symmetric nat that is a different external port per fd, so
+                // replying to the control-plane address instead would be
+                // dropped -- and S4 would report ~100% loss and conclude that
+                // port-range is useless, the inverse of the truth.
+                for (size_t k = 1; k < g_data_eps.size(); k++) {
+                    if (!g_data_eps[k].seen) continue;
+                    g_rev.fds.push_back(g_resp_fds[k]);
+                    g_rev.dsts.push_back(g_data_eps[k].addr);
+                }
+                if (g_rev.fds.empty()) {
+                    // No data port ever saw this peer, so no nat mapping exists
+                    // to reply through. Refuse rather than fall back to the
+                    // control port, which would silently measure single-port
+                    // loss and label it a multi-port result.
+                    //
+                    // Withholding the PHASE_ACK is the signal: Task 5's
+                    // prober_run_reverse_phase() treats a missing ACK for a
+                    // reverse phase as "not measured" and moves on, rather than
+                    // aborting a run that already has good upstream data.
+                    mylog(log_warn, "test: refusing spread reverse phase %d: no data port "
+                                    "has seen this peer\n", h.phase);
+                    g_rev.active = false;
+                    return;
+                }
+                mylog(log_info, "test: reverse phase %d will use %d data port(s)\n",
+                      h.phase, (int)g_rev.fds.size());
+            } else {
+                g_rev.fds.push_back(g_resp_fds[0]);
+                g_rev.dsts.push_back(g_resp.peer);
+            }
 
             mylog(log_info, "test: reverse phase %d begin, sending %u probes at %u pps\n",
                   h.phase, expected_n, pps);
@@ -1203,6 +1231,22 @@ int test_mode_prober_loop() {
         rep.have_spread    = true;
         rep.spread_ports   = (int)spread.size();
         rep.spread_loss_up = g_pr.result_stats.loss_rate;
+
+        // ---- S4: N ports, downstream ----
+        if (rep.down_status == test_report_t::DOWN_OK && rep.have_down) {
+            trace_t d4;
+            uint32_t fail4 = 0;
+            if (prober_run_reverse_phase(4, (uint32_t)test_pps, test_duration_sec,
+                                          true, &d4, &fail4)) {
+                trace_stats_t s4 = trace_analyze(d4);
+                rep.have_spread_down  = true;
+                rep.spread_loss_down  = s4.loss_rate;
+                rep.spread_ports_down = (int)spread.size();
+            } else {
+                mylog(log_warn, "test: multi-port reverse phase produced no data; "
+                                "skipping the downstream port-range comparison\n");
+            }
+        }
     }
 
     prober_sendto(TEST_BYE, 0, 0, NULL, 0, g_pr.peer, 0);

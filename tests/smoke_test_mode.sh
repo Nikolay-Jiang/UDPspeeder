@@ -12,6 +12,10 @@
 #          neither "not measured" nor "no packets" text.
 # Round 5: --test-no-reverse suppresses the reverse phase -> the report says
 #          the direction was disabled and prints no downstream recommendation.
+# Round 6: --data-port-range on both ends -> the responder spreads the reverse
+#          (S4) phase across all 4 data ports (each fd answers the address it
+#          itself observed during S3, per Task 6's nat design), and the report
+#          renders a downstream port-range comparison line.
 #
 # Timing note: the rate-scan phase is a fixed 10s x 3 sub-phases regardless of
 # --test-duration/--test-pps, so each prober run still pays ~36s minimum in
@@ -235,6 +239,33 @@ if grep -q "推荐配置 (server -> client" "$WORKDIR/r5_prober.log"; then
     exit 1
 fi
 echo "  [no-reverse] ok"
+echo
+
+echo "Round 6: multi-port reverse (--data-port-range on both ends)"
+DP_LO=$(( RESP_PORT + 100 ))
+DP_HI=$(( DP_LO + 3 ))
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" \
+    --data-port-range $DP_LO-$DP_HI --log-level 4 \
+    > "$WORKDIR/r6_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+"$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --data-port-range $DP_LO-$DP_HI --test-duration 2 --test-pps 100 \
+    > "$WORKDIR/r6_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "下行  单端口" "$WORKDIR/r6_prober.log"; then
+    echo "  FAIL: no downstream port-range comparison line"
+    sed -n '1,120p' "$WORKDIR/r6_prober.log"
+    exit 1
+fi
+if ! grep -q "reverse phase 4 will use 4 data port(s)" "$WORKDIR/r6_resp.log"; then
+    echo "  FAIL: responder did not spread the reverse phase across 4 data ports"
+    grep -i "reverse phase" "$WORKDIR/r6_resp.log" || true
+    exit 1
+fi
+echo "  [reverse-spread] ok"
 echo
 
 echo "=== PASSED ==="

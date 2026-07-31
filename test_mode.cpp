@@ -551,18 +551,31 @@ void test_render_report(const test_report_t &r) {
         }
     }
 
-    if (r.have_spread) {
+    if (r.have_spread || r.have_spread_down) {
         printf("\n--- port-range 对比 ---\n");
-        double base = r.have_up ? r.up.stats.loss_rate : 0.0;
-        printf("  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
-               base * 100.0, r.spread_ports, r.spread_loss_up * 100.0);
-        if (base > 0.0 && r.spread_loss_up < base) {
-            printf("  结论: 多端口降低丢包 %.0f%%,port-range 对该链路有效\n",
-                   (base - r.spread_loss_up) / base * 100.0);
-        } else if (base > 0.0 && r.spread_loss_up > base) {
-            printf("  结论: 多端口未降低丢包,port-range 对该链路无收益\n");
-        } else {
-            printf("  结论: 单端口已无丢包,无法判断 port-range 收益\n");
+        if (r.have_spread) {
+            double base = r.have_up ? r.up.stats.loss_rate : 0.0;
+            printf("  上行  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
+                   base * 100.0, r.spread_ports, r.spread_loss_up * 100.0);
+            if (base > 0.0 && r.spread_loss_up < base)
+                printf("    结论: 多端口降低上行丢包 %.0f%%,port-range 对该方向有效\n",
+                       (base - r.spread_loss_up) / base * 100.0);
+            else if (base > 0.0)
+                printf("    结论: 多端口未降低上行丢包,port-range 对该方向无收益\n");
+            else
+                printf("    结论: 上行单端口已无丢包,无法判断 port-range 收益\n");
+        }
+        if (r.have_spread_down) {
+            double base = r.have_down ? r.down.stats.loss_rate : 0.0;
+            printf("  下行  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
+                   base * 100.0, r.spread_ports_down, r.spread_loss_down * 100.0);
+            if (base > 0.0 && r.spread_loss_down < base)
+                printf("    结论: 多端口降低下行丢包 %.0f%%,port-range 对该方向有效\n",
+                       (base - r.spread_loss_down) / base * 100.0);
+            else if (base > 0.0)
+                printf("    结论: 多端口未降低下行丢包,port-range 对该方向无收益\n");
+            else
+                printf("    结论: 下行单端口已无丢包,无法判断 port-range 收益\n");
         }
     }
 
