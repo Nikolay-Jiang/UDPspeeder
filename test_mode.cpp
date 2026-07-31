@@ -522,7 +522,34 @@ void test_render_report(const test_report_t &r) {
     }
 
     if (r.have_up) render_direction("client -> server, 单端口", r.up);
-    if (r.have_down) render_direction("server -> client, 单端口", r.down);
+    if (r.have_down) {
+        render_direction("server -> client, 单端口", r.down);
+        if (r.down_peer_send_fail_n > 0) {
+            printf("\n--- 警告: 对端发送失败 ---\n");
+            printf("  对端有 %u/%u 个探测包未能发出(对端本地发送缓冲区满等)。\n",
+                   r.down_peer_send_fail_n, r.down_peer_send_total_n);
+            printf("  本端会把它们计为丢包,因此上方 server -> client 丢包率可能被高估;\n");
+            printf("  这部分并非链路丢包。注意需要调整的是**对端**的负载,而非本端 --test-pps。\n");
+        }
+    } else {
+        printf("\n--- 链路特征 (server -> client, 单端口) ---\n");
+        switch (r.down_status) {
+            case test_report_t::DOWN_DISABLED:
+                printf("  未测量: 已通过 --test-no-reverse 关闭该方向。\n");
+                break;
+            case test_report_t::DOWN_UNSUPPORTED:
+                printf("  未测量: 对端为较早的构建,不支持反向探测。\n");
+                printf("  两端升级到同一版本后可测出该方向。\n");
+                break;
+            case test_report_t::DOWN_NO_PACKETS:
+                printf("  未测出结果: 对端声称支持反向探测,但一个探测包也没有到达。\n");
+                printf("  可能原因: 对端到本端的 UDP 路径被阻断,或 NAT 映射已失效。\n");
+                printf("  注意这里不报 100%% 丢包 —— 没有收到数据与测得全丢是两回事。\n");
+                break;
+            default:
+                break;
+        }
+    }
 
     if (r.have_spread) {
         printf("\n--- port-range 对比 ---\n");

@@ -70,6 +70,7 @@ int    test_duration_sec = 30;
 int    test_pps = 200;
 int    test_pkt_size = 1200;
 double test_app_mbps = 0.0;  // 0 => derive from probe rate
+int    test_no_reverse = 0;
 
 int mssfix = default_mtu;
 
@@ -619,6 +620,7 @@ void process_arg(int argc, char *argv[]) {
             {"test-pps", required_argument, 0, 1},
             {"test-pkt-size", required_argument, 0, 1},
             {"test-app-mbps", required_argument, 0, 1},
+            {"test-no-reverse", no_argument, 0, 1},
             {NULL, 0, 0, 0}};
     int option_index = 0;
     assert(g_fec_par.rs_from_str(rs_par_str) == 0);
@@ -871,6 +873,9 @@ void process_arg(int argc, char *argv[]) {
                         mylog(log_fatal, "--test-app-mbps must be >= 0\n");
                         myexit(-1);
                     }
+                } else if (strcmp(long_options[option_index].name, "test-no-reverse") == 0) {
+                    test_no_reverse = 1;
+                    mylog(log_info, "--test-mode: reverse (server -> client) phases disabled\n");
                 } else if (strcmp(long_options[option_index].name, "delay-capacity") == 0) {
                     sscanf(optarg, "%d", &delay_capacity);
 

@@ -97,6 +97,9 @@ static void print_help() {
     printf("                                          absolute bandwidth. default: the probe rate itself.\n");
     printf("    --test-selftest                       run the evaluators built-in self-checks against synthetic traces\n");
     printf("                                          and exit; no network involved.\n");
+    printf("    --test-no-reverse                      skip the server -> client measurement (only client -> server\n");
+    printf("                                          is measured); useful when the peer is an old build that does\n");
+    printf("                                          not support it, or when only the upstream number is wanted.\n");
     printf("    --data-port-range     a-b             optional, same flag as above: when set on both sides, also probes\n");
     printf("                                          upstream traffic spread across the n ports and reports whether\n");
     printf("                                          port-range mode would reduce loss on this link. it must be\n");
@@ -104,12 +107,13 @@ static void print_help() {
     printf("                                          detected during the handshake and the session is refused.\n");
     printf("      NOTE: --test-pps x --test-duration must not exceed 500000 probes per phase; the\n");
     printf("            combination is validated at startup.\n");
-    printf("      NOTE: only the client -> server direction is measured; the report has no\n");
-    printf("            server -> client section. total runtime is the fixed 30s rate scan plus one\n");
-    printf("            --test-duration pass, plus a second --test-duration pass if --data-port-range\n");
-    printf("            is set (about 30s + 2x --test-duration then). residual loss is a conservative\n");
-    printf("            replay estimate computed with -i excluded, so the real result after applying\n");
-    printf("            the recommended -i should be better than shown.\n");
+    printf("      NOTE: both directions are measured by default: client -> server and, if the peer\n");
+    printf("            supports it, server -> client (see --test-no-reverse). total runtime is the\n");
+    printf("            fixed 30s rate scan plus one --test-duration pass per direction, plus a second\n");
+    printf("            --test-duration pass if --data-port-range is set (about 30s + 2x/3x\n");
+    printf("            --test-duration then). residual loss is a conservative replay estimate computed\n");
+    printf("            with -i excluded, so the real result after applying the recommended -i should\n");
+    printf("            be better than shown.\n");
 
     printf("log and help options:\n");
     printf("    --log-level           <number>        0: never    1: fatal   2: error   3: warn \n");

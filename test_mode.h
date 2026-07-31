@@ -11,6 +11,7 @@ extern int    test_duration_sec;  // default 30, max 600
 extern int    test_pps;           // default 200, max 20000
 extern int    test_pkt_size;      // default 1200, max 1400
 extern double test_app_mbps;      // 0 => derive from probe rate
+extern int    test_no_reverse;     // 1 => skip the server -> client phases
 
 const int TEST_DURATION_MAX = 600;
 const int TEST_PPS_MAX      = 20000;
@@ -209,6 +210,22 @@ struct test_report_t {
     // per-direction recommendations (single port)
     bool             have_up, have_down;
     recommendation_t up, down;
+
+    // Why the down direction is missing, so the report can say so instead of
+    // rendering a fabricated 100% loss.
+    enum down_status_t {
+        DOWN_OK = 0,
+        DOWN_DISABLED,      // --test-no-reverse
+        DOWN_UNSUPPORTED,   // peer did not advertise TEST_CAP_REVERSE
+        DOWN_NO_PACKETS     // peer said it would send, nothing arrived
+    };
+    down_status_t down_status;
+
+    // Probes the RESPONDER's local stack refused to send, reported over
+    // PHASE_END. Counted as loss by this end, so the report flags them --
+    // and must name the peer, or the operator will tune their own --test-pps.
+    uint32_t down_peer_send_fail_n;
+    uint32_t down_peer_send_total_n;
 
     // Probes the local stack refused to send (ENOBUFS/EWOULDBLOCK etc.),
     // summed over every phase. These are counted as lost by the responder but

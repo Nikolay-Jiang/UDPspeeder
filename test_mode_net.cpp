@@ -948,6 +948,118 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
           g_pr.result_stats.lost_n, g_pr.result_stats.n);
 }
 
+// Drives one server -> client phase: ask the responder to send, then record
+// arrivals locally. Unlike the upstream phases, the trace never crosses the
+// wire -- the recorder is the evaluator.
+//
+// Returns false when not a single probe arrived, which the caller must render
+// as "direction not measured" rather than as 100% loss: a fabricated
+// concrete-looking number is the worst failure mode this feature has.
+static bool prober_run_reverse_phase(int phase, uint32_t pps, int duration_sec,
+                                      bool spread, trace_t *trace_out,
+                                      uint32_t *peer_send_fail_out) {
+    uint32_t total = pps * (uint32_t)duration_sec;
+    char begin_pl[TEST_PHASE_BEGIN_PL_LEN];
+    test_phase_begin_pack(begin_pl, total, pps, 1, spread ? 1 : 0);
+
+    // Unlike an upstream phase, a missing ACK here is NOT fatal: the responder
+    // deliberately withholds it when it cannot run the phase (Task 6 refuses a
+    // spread phase when no data port has seen this peer). Treat it as "this
+    // direction was not measured" and let the caller say so, rather than
+    // killing a run that has already produced good upstream data.
+    if (!prober_exchange(TEST_PHASE_BEGIN, phase, begin_pl, sizeof(begin_pl),
+                          TEST_PHASE_ACK, 1000, 5, NULL, NULL)) {
+        mylog(log_warn, "test: responder did not ack reverse phase %d; "
+                        "treating this direction as not measured\n", phase);
+        trace_out->init(1, pps);   // caller may still read it; keep it valid
+        *peer_send_fail_out = 0;
+        return false;
+    }
+
+    mylog(log_info, "test: reverse phase %d running -- expecting %u probes at %u pps\n",
+          phase, total, pps);
+
+    trace_out->init(total, pps);
+    *peer_send_fail_out = 0;
+
+    my_time_t start_us       = get_current_time_us();
+    my_time_t last_probe_us  = 0;
+    my_time_t last_keepalive = start_us;
+    uint32_t  arrived        = 0;
+    bool      got_end        = false;
+
+    // Hard ceiling so a peer that ACKs and then stalls cannot hang the run.
+    // The phase itself may legitimately run long (the responder re-bases its
+    // pacer rather than dropping probes), so allow generous slack.
+    my_time_t deadline_us = start_us +
+        (my_time_t)(duration_sec + 30) * 1000000ULL;
+    // If nothing at all arrives this soon after the ACK, the peer is not
+    // sending -- bail early rather than waiting out the whole duration.
+    const my_time_t FIRST_PROBE_LIMIT_US = 5000000ULL;
+
+    while (get_current_time_us() < deadline_us) {
+        my_time_t now = get_current_time_us();
+
+        if (arrived == 0 && now - start_us > FIRST_PROBE_LIMIT_US) break;
+        if (got_end) break;
+        // Idle finalize, mirroring the responder's fallback: five inter-packet
+        // gaps, floored at 2s, in case all three PHASE_END copies were lost.
+        if (arrived > 0 && last_probe_us != 0) {
+            my_time_t limit = 2000000ULL;
+            if (pps > 0) {
+                my_time_t five = (my_time_t)(5.0 / (double)pps * 1000000.0);
+                if (five > limit) limit = five;
+            }
+            if (now - last_probe_us > limit) break;
+        }
+
+        // Keepalive: a re-sent PHASE_BEGIN for the running phase. The
+        // responder's duplicate guard re-ACKs it without touching the pacer,
+        // and it refreshes both the session idle timer and the 5s dead-man
+        // switch. The prober is otherwise silent for the whole phase.
+        if (now - last_keepalive > 1000000ULL) {
+            last_keepalive = now;
+            prober_sendto(TEST_PHASE_BEGIN, phase, 0, begin_pl, sizeof(begin_pl),
+                          g_pr.peer, 0);
+        }
+
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100 * 1000;
+        fd_set rf;
+        FD_ZERO(&rf);
+        FD_SET(g_pr.fd, &rf);
+        int sr = select(g_pr.fd + 1, &rf, NULL, NULL, &tv);
+        if (sr <= 0) continue;
+
+        for (;;) {
+            char buf[TEST_BUF_MAX];
+            int len = recv(g_pr.fd, buf, sizeof(buf), 0);
+            if (len <= 0) break;
+            test_hdr_t h;
+            uint8_t *pl = 0;
+            int pl_len = 0;
+            int mt = test_decode(buf, len, &h, &pl, &pl_len);
+            if (mt < 0 || h.phase != (uint8_t)phase) continue;
+            if (mt == TEST_PROBE) {
+                last_probe_us = get_current_time_us();
+                trace_out->record(h.seq, last_probe_us);
+                arrived++;
+            } else if (mt == TEST_PHASE_END) {
+                if (pl_len >= 8) *peer_send_fail_out = read_u32((char *)pl + 4);
+                got_end = true;
+            }
+        }
+    }
+
+    if (arrived == 0) {
+        mylog(log_warn, "test: reverse phase %d -- no probes arrived at all\n", phase);
+        return false;
+    }
+    mylog(log_info, "test: reverse phase %d received %u/%u\n", phase, arrived, total);
+    return true;
+}
+
 int test_mode_prober_loop() {
     // main() installs SIGINT/SIGTERM as libev signal watchers, whose handlers
     // only set a pending flag and defer the real callback to ev_run(). The
@@ -1026,7 +1138,6 @@ int test_mode_prober_loop() {
     rep.app_mbps     = (test_app_mbps > 0.0) ? test_app_mbps : rep.probe_mbps;
     rep.rtt_ms       = g_pr.rtt_us / 1000.0;
     snprintf(rep.peer, sizeof(rep.peer), "%s", remote_addr.get_str());
-    rep.have_down = false;  // S2/S4 not implemented yet; do not fabricate.
 
     // result_wire_unpack fills each tier's bandwidth column from these.
     g_pr.app_mbps = rep.app_mbps;
@@ -1063,6 +1174,28 @@ int test_mode_prober_loop() {
     rep.up.thrifty    = g_pr.result_tiers[0];
     rep.up.balanced   = g_pr.result_tiers[1];
     rep.up.aggressive = g_pr.result_tiers[2];
+
+    // ---- S2: single port, downstream ----
+    rep.down_status = test_report_t::DOWN_OK;
+    if (test_no_reverse) {
+        rep.down_status = test_report_t::DOWN_DISABLED;
+    } else if (!(g_pr.peer_caps & TEST_CAP_REVERSE)) {
+        rep.down_status = test_report_t::DOWN_UNSUPPORTED;
+        mylog(log_warn, "test: peer does not advertise reverse-phase support; "
+                        "skipping the server -> client measurement\n");
+    } else {
+        trace_t down_trace;
+        uint32_t peer_fail = 0;
+        if (prober_run_reverse_phase(2, (uint32_t)test_pps, test_duration_sec,
+                                      false, &down_trace, &peer_fail)) {
+            rep.have_down = true;
+            rep.down = test_evaluate(down_trace, rep.app_mbps, rep.pkt_size);
+            rep.down_peer_send_fail_n  = peer_fail;
+            rep.down_peer_send_total_n = (uint32_t)test_pps * (uint32_t)test_duration_sec;
+        } else {
+            rep.down_status = test_report_t::DOWN_NO_PACKETS;
+        }
+    }
 
     // ---- S3: N ports, upstream (only when --data-port-range was given) ----
     if (!spread.empty()) {

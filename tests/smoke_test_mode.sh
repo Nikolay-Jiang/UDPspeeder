@@ -7,10 +7,16 @@
 #          loss lands in a 5-16% band (injection is pseudo-random per run, so
 #          we assert a band rather than a point value), a recommendation
 #          section is rendered, and all three tier rows carry a real -f value.
+# Round 4: reverse (server -> client) phase on a clean loopback -> a real
+#          "server -> client" section is rendered, with reported loss <1% and
+#          neither "not measured" nor "no packets" text.
+# Round 5: --test-no-reverse suppresses the reverse phase -> the report says
+#          the direction was disabled and prints no downstream recommendation.
 #
 # Timing note: the rate-scan phase is a fixed 10s x 3 sub-phases regardless of
-# --test-duration/--test-pps, so each prober run takes ~36s minimum. The whole
-# script (selftest + 2 full prober runs) takes roughly ~2 minutes.
+# --test-duration/--test-pps, so each prober run still pays ~36s minimum in
+# addition to its S1 (and now S2) phases. The whole script (selftest + 4 full
+# prober runs) takes roughly 3-4 minutes.
 #
 # Usage: bash tests/smoke_test_mode.sh [/path/to/speederv2]
 # Exit 0 on pass, non-zero on failure.
@@ -174,6 +180,61 @@ echo "$OUT3" | grep -q "推荐配置" || { echo "  FAIL: no recommendation secti
 assert_all_tiers_have_fec "$OUT3"
 echo "  [drop] all three tier rows carry an -f value"
 echo "  [drop] ok"
+echo
+
+echo "Round 4: reverse phase on a clean loopback"
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" --log-level 4 \
+    > "$WORKDIR/r4_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+"$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --test-duration 2 --test-pps 100 > "$WORKDIR/r4_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "server -> client, 单端口" "$WORKDIR/r4_prober.log"; then
+    echo "  FAIL: no server -> client section in the report"
+    sed -n '1,80p' "$WORKDIR/r4_prober.log"
+    exit 1
+fi
+if grep -q "未测出结果\|未测量" "$WORKDIR/r4_prober.log"; then
+    echo "  FAIL: reverse direction reported as unmeasured on a clean loopback"
+    exit 1
+fi
+DOWN_LOSS=$(sed -n '/server -> client, 单端口/,/推荐配置/p' "$WORKDIR/r4_prober.log" \
+    | grep "丢包率" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+if [[ -z "$DOWN_LOSS" ]]; then
+    echo "  FAIL: could not parse downstream loss"
+    exit 1
+fi
+if awk -v v="$DOWN_LOSS" 'BEGIN{exit !(v > 1.0)}'; then
+    echo "  FAIL: downstream loss $DOWN_LOSS% too high on clean loopback"
+    exit 1
+fi
+echo "  [reverse-clean] downstream loss = $DOWN_LOSS%"
+echo "  [reverse-clean] ok"
+echo
+
+echo "Round 5: --test-no-reverse suppresses the reverse phase"
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" --log-level 4 \
+    > "$WORKDIR/r5_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+"$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --test-duration 2 --test-pps 100 --test-no-reverse \
+    > "$WORKDIR/r5_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "已通过 --test-no-reverse 关闭该方向" "$WORKDIR/r5_prober.log"; then
+    echo "  FAIL: --test-no-reverse did not report the direction as disabled"
+    exit 1
+fi
+if grep -q "推荐配置 (server -> client" "$WORKDIR/r5_prober.log"; then
+    echo "  FAIL: --test-no-reverse still produced a downstream recommendation"
+    exit 1
+fi
+echo "  [no-reverse] ok"
 echo
 
 echo "=== PASSED ==="
