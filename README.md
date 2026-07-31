@@ -173,10 +173,14 @@ prober instead of a tunnel, then exits.
 
 #### What it does
 
-`--test-mode` measures real upstream (client → server) packet loss on the
-link and recommends `-f x:y -i n` settings from what it measured, instead of
-you guessing. Currently only the client → server direction is measured; the
-report has no server → client section (a future revision may add it).
+`--test-mode` measures real packet loss on the link and recommends `-f x:y -i n`
+settings from what it measured, instead of you guessing. Both directions are
+measured. The report gives a separate `-f`/`-i` for each end, because `-f` is
+per-direction — the receiver reads `data_num`/`redundant_num` off the wire
+rather than from its own config, so the two ends need not match — and real
+links are routinely asymmetric. The server → client probes travel back
+through the NAT mapping the client already punched, so the client needs no
+inbound port.
 
 - **Responder** (far end, just answers probes): `-s --test-mode -l <ip:port>`
 - **Prober** (drives the measurement, prints the report): `-c --test-mode -r <ip:port>`
@@ -196,7 +200,7 @@ report has no server → client section (a future revision may add it).
 ```
 
 Add `--data-port-range a-b` on **both** sides to also compare single-port vs.
-N-port upstream loss. It is the same flag documented under
+N-port loss in each direction. It is the same flag documented under
 [Port-Range Mode](#port-range-mode-defeat-per-flow-isp-rate-limiting) above;
 `--port-range-mode` itself is not required in test mode.
 
@@ -218,14 +222,29 @@ far finer than the tightest recommendation tier needs.
 | `--test-pps <number>` | 200 | 1–20000 | probe packet rate |
 | `--test-pkt-size <number>` | 1200 | 64–1400 | probe packet size |
 | `--test-app-mbps <number>` | probe rate | — | your real payload rate; used only to convert redundancy overhead into an absolute Mbps figure |
+| `--test-no-reverse` | off (reverse runs) | — | skip the server → client phases; prober-side only, the responder always supports them |
 | `--test-selftest` | — | — | run the evaluator's self-checks against synthetic traces and exit; touches no network |
 
 Total runtime is the fixed 30-second rate scan (3 × 10s, independent of
-`--test-duration`) plus one `--test-duration` pass, plus a second
-`--test-duration` pass if `--data-port-range` is set. With the defaults
-that's roughly 1 minute for a single-port run, or about 1.5 minutes with
-`--data-port-range`; even a minimal run (`--test-duration 1`) takes about 30
-seconds, because of the fixed scan.
+`--test-duration`) plus one `--test-duration` pass per direction, plus
+another pair if `--data-port-range` is set. With the default
+`--test-duration 30`:
+
+| Scenario | Runtime |
+|---|---|
+| single-port | 90s |
+| multi-port (`--data-port-range`) | 150s |
+| single-port with `--test-no-reverse` | 60s |
+| multi-port with `--test-no-reverse` | 90s |
+
+Even a minimal run (`--test-duration 1`) still pays the 30-second fixed scan.
+
+**Known limitation:** the rate scan probes client → server only. A link that is
+policed *only* on the server → client direction will not be flagged as policed,
+and the server → client table will still print FEC recommendations whose premise
+does not hold. Widening the scan to both directions would double the fixed 30s
+scan, which was judged not worth it; if you suspect downstream policing, run the
+tool a second time with the roles reversed.
 
 #### Reading the report
 
@@ -252,10 +271,18 @@ The report contains, in order:
    tier whose target is below this run's sampling resolution is marked as
    extrapolated; a target no candidate can reach is reported as unreachable
    rather than a fabricated number.
-4. **Port-range comparison**, only when `--data-port-range` was given:
-   single-port vs. N-port upstream loss, and whether port-range mode would
-   help on this link.
-5. **A suggested command line** for the balanced tier.
+4. **Link characteristics and three candidate configs** for the
+   `server -> client` direction, mirroring section 2/3 above but for the
+   reverse phase. If that direction wasn't measured — `--test-no-reverse` was
+   given, the peer is an older build that doesn't support it, or the peer
+   claimed support but no probes arrived — the section says so explicitly
+   (with the reason) and prints no loss figure; it is never rendered as 100%
+   loss.
+5. **Port-range comparison**, only when `--data-port-range` was given:
+   single-port vs. N-port loss for each direction, and whether port-range
+   mode would help on this link.
+6. **A suggested command line** for the balanced tier of each measured
+   direction.
 
 #### How the recommendation is derived
 

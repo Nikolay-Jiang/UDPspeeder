@@ -95,6 +95,8 @@ static void print_help() {
     printf("    --test-pkt-size       <number>        probe packet size, default: 1200, min: 64, max: 1400.\n");
     printf("    --test-app-mbps       <number>        your real payload rate, used to convert redundancy overhead into\n");
     printf("                                          absolute bandwidth. default: the probe rate itself.\n");
+    printf("    --test-no-reverse                     skip the server -> client phases. only needed on the prober;\n");
+    printf("                                          the responder always supports them.\n");
     printf("    --test-selftest                       run the evaluators built-in self-checks against synthetic traces\n");
     printf("                                          and exit; no network involved.\n");
     printf("    --data-port-range     a-b             optional, same flag as above: when set on both sides, also probes\n");
@@ -104,12 +106,12 @@ static void print_help() {
     printf("                                          detected during the handshake and the session is refused.\n");
     printf("      NOTE: --test-pps x --test-duration must not exceed 500000 probes per phase; the\n");
     printf("            combination is validated at startup.\n");
-    printf("      NOTE: only the client -> server direction is measured; the report has no\n");
-    printf("            server -> client section. total runtime is the fixed 30s rate scan plus one\n");
-    printf("            --test-duration pass, plus a second --test-duration pass if --data-port-range\n");
-    printf("            is set (about 30s + 2x --test-duration then). residual loss is a conservative\n");
-    printf("            replay estimate computed with -i excluded, so the real result after applying\n");
-    printf("            the recommended -i should be better than shown.\n");
+    printf("      NOTE: both directions are measured; the report gives a separate -f/-i for each\n");
+    printf("            end, because -f is per-direction and links are often asymmetric. total\n");
+    printf("            runtime is the fixed 30s rate scan plus two --test-duration passes, plus\n");
+    printf("            two more if --data-port-range is set (about 30s + 2x or 4x). the rate\n");
+    printf("            scan itself only probes client -> server, so a link policed ONLY on the\n");
+    printf("            server -> client direction will not be detected as policed.\n");
 
     printf("log and help options:\n");
     printf("    --log-level           <number>        0: never    1: fatal   2: error   3: warn \n");

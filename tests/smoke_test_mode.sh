@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke_test_mode.sh — end-to-end check for --test-mode
 #
-# Round 1: --test-selftest (pure-function regression, expects 75 checks/0 fail)
+# Round 1: --test-selftest (pure-function regression, expects 95 checks/0 fail)
 # Round 2: loopback probe with no injected loss   -> reported loss < 1%
 # Round 3: loopback probe with --random-drop 1000 (~10% injected) -> reported
 #          loss lands in a 5-16% band (injection is pseudo-random per run, so
@@ -19,8 +19,9 @@
 #
 # Timing note: the rate-scan phase is a fixed 10s x 3 sub-phases regardless of
 # --test-duration/--test-pps, so each prober run still pays ~36s minimum in
-# addition to its S1 (and now S2) phases. The whole script (selftest + 4 full
-# prober runs) takes roughly 3-4 minutes.
+# addition to its S1/S2 (and, for round 6, S3/S4) phases. The whole script
+# (selftest + 5 full prober runs, one per Round 2-6) takes roughly 2.5
+# minutes.
 #
 # Usage: bash tests/smoke_test_mode.sh [/path/to/speederv2]
 # Exit 0 on pass, non-zero on failure.
