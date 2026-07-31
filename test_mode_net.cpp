@@ -136,6 +136,12 @@ struct responder_state_t {
 static responder_state_t g_resp;
 static std::vector<int> g_resp_fds;
 
+// Round-trip hint, measured as the gap between the HELLO we answered and the
+// first message that came back. Only used to size the reverse phase's grace
+// period, so a rough figure is fine.
+static my_time_t g_pr_rtt_hint_us = 0;
+static my_time_t g_hello_ack_sent_us = 0;
+
 // The source address most recently seen on each responder fd, parallel to
 // g_resp_fds (index 0 = control fd, 1..N = data fds). Task 6's reverse
 // multi-port phase must send from fd k back to the address that fd actually
@@ -147,6 +153,60 @@ struct data_ep_t {
     address_t addr;
 };
 static std::vector<data_ep_t> g_data_eps;
+
+// ---------------- responder reverse-phase sender ----------------
+//
+// The responder is a traffic source only here. Two independent deadlines guard
+// it: the 45s session idle limit (unchanged, whole-session) and the dead-man
+// switch below, which applies ONLY while a reverse phase is running. The
+// prober is silent during a reverse phase apart from its 1s keepalives, so
+// without the keepalives the 45s limit would kill a legitimate long phase --
+// and without the dead-man switch a kill -9'd prober would leave the responder
+// blasting a dead address at full rate for up to --test-duration (600s).
+static const my_time_t REV_DEADMAN_US = 5000000ULL;   // 5s
+static const int       REV_END_COPIES = 3;
+static const double    REV_TICK_SEC   = 0.001;
+
+struct rev_send_t {
+    bool      active = false;
+    int       phase = 0;
+    uint32_t  total = 0;
+    uint32_t  sent = 0;
+    uint32_t  send_fail = 0;
+    uint32_t  pps = 0;
+    pacer_t   pacer;
+    my_time_t last_peer_rx_us = 0;
+    // fds[k] is paired with dsts[k]: each fd must reply to the address that fd
+    // itself saw, or a symmetric nat drops it.
+    std::vector<int>       fds;
+    std::vector<address_t> dsts;
+    size_t    rr = 0;
+    int       end_copies_left = 0;
+};
+
+static rev_send_t   g_rev;
+static struct ev_timer g_rev_tick;
+static struct ev_timer g_rev_end;
+
+// Like responder_send(), but lets the caller set seq and padding -- reverse
+// probes need both, and responder_send() hardcodes them to 0.
+static void responder_send_ex(int fd, const address_t &to, int msg_type, int phase,
+                              uint32_t seq, const void *payload, int payload_len,
+                              int pad_to) {
+    char out[TEST_BUF_MAX];
+    int n = test_encode(msg_type, phase, seq, payload, payload_len, out, sizeof(out), pad_to);
+    if (n < 0) return;
+    address_t dst = to;
+    if (sendto(fd, out, n, 0, (struct sockaddr *)&dst.inner, dst.get_len()) < 0) {
+        // Local backpressure, not link loss. The prober counts the missing seq
+        // as lost either way, so it is reported over PHASE_END rather than
+        // silently corrected -- surfacing the caveat is honest, quietly
+        // adjusting a number the peer actually measured is not.
+        if (msg_type == TEST_PROBE) g_rev.send_fail++;
+        mylog(log_debug, "test: reverse sendto(%s) failed: %s\n",
+              dst.get_str(), get_sock_error());
+    }
+}
 
 // Records `src` as the peer most recently seen on watcher `w`'s fd. Callers
 // must only reach this once the packet is already known-accepted (mac-valid
@@ -240,16 +300,91 @@ static void responder_finalize_phase() {
 
 static void responder_send(int fd, const address_t &to, int msg_type, int phase,
                            const void *payload, int payload_len) {
-    char out[TEST_BUF_MAX];
-    int n = test_encode(msg_type, phase, 0, payload, payload_len, out, sizeof(out), 0);
-    if (n < 0) return;
-    address_t dst = to;
-    sendto(fd, out, n, 0, (struct sockaddr *)&dst.inner, dst.get_len());
+    responder_send_ex(fd, to, msg_type, phase, 0, payload, payload_len, 0);
+}
+
+static void rev_stop(struct ev_loop *loop) {
+    // g_rev.active stays true for the whole reverse phase, including the
+    // grace wait and the three PHASE_END retries driven by g_rev_end, not
+    // just the probe-sending window driven by g_rev_tick. Callers outside
+    // rev_tick_cb/rev_end_cb (TEST_BYE, idle expiry, a fresh HELLO) can land
+    // in either window, so both timers must be stopped here or the one not
+    // covered is left armed against a session that no longer matches its
+    // stale g_rev state. ev_timer_stop is a no-op on a timer that is not
+    // currently active -- including one that was never ev_init'd, since a
+    // static ev_timer is zero-initialized and so starts inactive -- so
+    // stopping both unconditionally is safe from every call site.
+    ev_timer_stop(loop, &g_rev_tick);
+    ev_timer_stop(loop, &g_rev_end);
+    g_rev.active = false;
+}
+
+static void rev_end_cb(struct ev_loop *loop, struct ev_timer *w, int revents) {
+    assert(!(revents & EV_ERROR));
+    // PHASE_END is unacked and can be lost, so send three copies 20ms apart --
+    // the same belt-and-braces the prober uses on the upstream path.
+    char pl[8];
+    write_u32(pl + 0, g_rev.sent);
+    write_u32(pl + 4, g_rev.send_fail);
+    responder_send_ex(g_resp_fds[0], g_resp.peer, TEST_PHASE_END, g_rev.phase,
+                      0, pl, sizeof(pl), 0);
+    g_rev.end_copies_left--;
+    if (g_rev.end_copies_left > 0) {
+        ev_timer_set(w, 0.02, 0.0);
+        ev_timer_start(loop, w);
+    } else {
+        mylog(log_info, "test: reverse phase %d done, sent %u/%u (%u refused locally)\n",
+              g_rev.phase, g_rev.sent, g_rev.total, g_rev.send_fail);
+        rev_stop(loop);
+    }
+}
+
+static void rev_tick_cb(struct ev_loop *loop, struct ev_timer *w, int revents) {
+    assert(!(revents & EV_ERROR));
+    (void)w;
+    if (!g_rev.active) return;
+
+    my_time_t now = get_current_time_us();
+    if (now - g_rev.last_peer_rx_us > REV_DEADMAN_US) {
+        mylog(log_warn, "test: reverse phase %d aborted -- no keepalive from %s for %llu ms "
+                        "(prober interrupted?)\n",
+              g_rev.phase, g_resp.peer.get_str(),
+              (unsigned long long)((now - g_rev.last_peer_rx_us) / 1000));
+        rev_stop(loop);
+        return;
+    }
+
+    int budget = g_rev.pacer.tick(now);
+    for (int b = 0; b < budget && g_rev.sent < g_rev.total; b++) {
+        size_t k = g_rev.rr % g_rev.fds.size();
+        g_rev.rr++;
+        // Mirrors prober_sendto: --random-drop is implemented here too, and
+        // only for probes, so smoke tests can inject a known reverse loss rate.
+        // Dropping control messages would break the handshake instead.
+        bool drop = (random_drop != 0 &&
+                     get_fake_random_number() % 10000 < (u32_t)random_drop);
+        if (!drop)
+            responder_send_ex(g_rev.fds[k], g_rev.dsts[k], TEST_PROBE, g_rev.phase,
+                              g_rev.sent, NULL, 0, test_pkt_size);
+        g_rev.sent++;
+    }
+
+    if (g_rev.sent >= g_rev.total) {
+        ev_timer_stop(loop, &g_rev_tick);
+        // Grace before PHASE_END: probes and PHASE_END travel on different
+        // sockets (data fds vs the control fd), so nothing orders the last
+        // probe ahead of PHASE_END, and the prober finalizes on PHASE_END.
+        double grace = g_pr_rtt_hint_us > 0 ? (double)g_pr_rtt_hint_us * 2 / 1e6 : 0.5;
+        if (grace < 0.5) grace = 0.5;
+        g_rev.end_copies_left = REV_END_COPIES;
+        ev_init(&g_rev_end, rev_end_cb);
+        ev_timer_set(&g_rev_end, grace, 0.0);
+        ev_timer_start(loop, &g_rev_end);
+    }
 }
 
 static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
     assert(!(revents & EV_ERROR));
-    (void)loop;
 
     char buf[TEST_BUF_MAX];
     address_t::storage_t src_stor;
@@ -302,6 +437,8 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
     // of an active session: it is proof of life, so it holds off idle expiry.
     if (mt != TEST_HELLO) {
         g_resp.last_rx_us = get_current_time_us();
+        if (g_pr_rtt_hint_us == 0 && g_hello_ack_sent_us != 0)
+            g_pr_rtt_hint_us = get_current_time_us() - g_hello_ack_sent_us;
 
         // Refresh this fd's view of the peer. Only from an accepted (mac-valid,
         // pinned) packet, so an off-path sender cannot redirect the reverse
@@ -334,12 +471,21 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.active = true;
         g_resp.peer = src;
         g_resp.phase_open = false;
+        // A fresh HELLO re-establishes the session from scratch, same as
+        // phase_open above: a reverse phase left running from a stale session
+        // would otherwise keep ticking against whatever the new session does
+        // next, with no prober watching for its PHASE_END. Ordinarily this
+        // path is only reached once per prober run; it also covers the
+        // pathological case of a same-address reconnect while our reverse
+        // phase to the old session is still in flight.
+        if (g_rev.active) rev_stop(loop);
         g_resp.last_rx_us = get_current_time_us();
         note_fd_ep(w, src);
         mylog(log_info, "test: session from %s\n", src.get_str());
         char ack[8];
         int ack_len = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE);
         responder_send(w->fd, src, TEST_HELLO_ACK, 0, ack, ack_len);
+        g_hello_ack_sent_us = get_current_time_us();
 
     } else if (mt == TEST_PHASE_BEGIN) {
         uint32_t expected_n = 0, pps = 0, dir = 0, spread = 0;
@@ -365,9 +511,56 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             return;
         }
         if (dir != 0) {
-            // Reverse-direction phases are driven by Task 9's prober asking us to
-            // send; not supported until then. ACK so the prober can proceed.
+            // A duplicate PHASE_BEGIN is the prober's keepalive during a
+            // reverse phase (it is otherwise silent). Re-ACK and return
+            // WITHOUT touching the pacer or the counters: restarting them
+            // would replay the whole phase and manufacture huge phantom loss.
+            if (g_rev.active && g_rev.phase == h.phase) {
+                g_rev.last_peer_rx_us = get_current_time_us();
+                responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
+                return;
+            }
+            // The responder is a traffic source here, so it bounds rate and
+            // volume itself instead of trusting the peer. TEST_MAX_EXPECTED_N
+            // is a memory bound for recording a trace and is far too loose to
+            // double as "how much may I transmit".
+            if (expected_n > (uint32_t)TEST_MAX_TOTAL_PROBES || pps == 0 ||
+                pps > (uint32_t)TEST_PPS_MAX) {
+                mylog(log_warn, "test: refusing reverse phase: expected_n=%u (cap %lld), "
+                                "pps=%u (cap %d)\n",
+                      expected_n, TEST_MAX_TOTAL_PROBES, pps, TEST_PPS_MAX);
+                return;
+            }
+
+            // A PHASE_BEGIN for a NEW phase number (not the duplicate caught
+            // above) while a previous reverse phase's timers are still armed
+            // must stop them first: ev_init() below unconditionally clears
+            // libev's internal "active" flag without unlinking the watcher
+            // from its timer heap, so re-initializing a still-running
+            // g_rev_tick/g_rev_end in place would corrupt libev's heap
+            // rather than just leaking a stale phase. Not expected in normal
+            // operation (the prober runs one phase at a time), but cheap to
+            // make safe regardless.
+            if (g_rev.active) rev_stop(loop);
+
+            g_rev = rev_send_t();
+            g_rev.active = true;
+            g_rev.phase  = h.phase;
+            g_rev.total  = expected_n;
+            g_rev.pps    = pps;
+            g_rev.last_peer_rx_us = get_current_time_us();
+            g_rev.pacer.init((double)pps, get_current_time_us());
+            // Task 6 fills this from g_data_eps when spread != 0. Single-port
+            // reverse always answers on the control fd, to the pinned peer.
+            g_rev.fds.push_back(g_resp_fds[0]);
+            g_rev.dsts.push_back(g_resp.peer);
+
+            mylog(log_info, "test: reverse phase %d begin, sending %u probes at %u pps\n",
+                  h.phase, expected_n, pps);
             responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
+            ev_init(&g_rev_tick, rev_tick_cb);
+            ev_timer_set(&g_rev_tick, REV_TICK_SEC, REV_TICK_SEC);
+            ev_timer_start(loop, &g_rev_tick);
             return;
         }
         g_resp.phase = h.phase;
@@ -397,6 +590,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         mylog(log_info, "test: session closed by %s\n", src.get_str());
         g_resp.active = false;
         g_resp.phase_open = false;
+        if (g_rev.active) rev_stop(loop);
         for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
     }
 }
@@ -404,7 +598,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
 // Fallback: if all three PHASE_END copies were lost, finalize on silence.
 static void responder_timer_cb(struct ev_loop *loop, struct ev_timer *w, int revents) {
     assert(!(revents & EV_ERROR));
-    (void)loop; (void)w;
+    (void)w;
 
     // Expire an abandoned session (interrupted/killed prober -- no TEST_BYE).
     // phase_open must be cleared with it, or a stale half-open phase would leak
@@ -417,6 +611,7 @@ static void responder_timer_cb(struct ev_loop *loop, struct ev_timer *w, int rev
                   g_resp.peer.get_str(), (unsigned long long)(silent_us / 1000000ULL));
             g_resp.active = false;
             g_resp.phase_open = false;
+            if (g_rev.active) rev_stop(loop);
             for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
             return;
         }
