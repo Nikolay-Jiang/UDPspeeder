@@ -131,6 +131,13 @@ struct responder_state_t {
 
     uint32_t           cur_pps = 0;
     my_time_t          last_mac_warn_ms = 0;
+
+    // Most recent reverse phase this session already tore down (finished or
+    // aborted), so a late keepalive for that same phase number cannot restart
+    // it from scratch -- see the guard in the TEST_PHASE_BEGIN dir!=0 branch.
+    // -1 = none yet this session (h.phase is a uint8_t, 0..255, so -1 is never
+    // a real phase number).
+    int                last_rev_phase_done = -1;
 };
 
 static responder_state_t g_resp;
@@ -316,6 +323,17 @@ static void rev_stop(struct ev_loop *loop) {
     // stopping both unconditionally is safe from every call site.
     ev_timer_stop(loop, &g_rev_tick);
     ev_timer_stop(loop, &g_rev_end);
+    // Every call site reaches here only while g_rev.active was true (external
+    // callers check it before calling; rev_tick_cb/rev_end_cb only call it from
+    // inside their own active-phase logic), so g_rev.phase is the phase being
+    // torn down here, whether by success, dead-man abort, TEST_BYE, idle
+    // expiry, or a fresh HELLO. Recording it lets a late keepalive for this
+    // exact phase number be recognized as stale and re-acked instead of
+    // restarting the whole phase (see the TEST_PHASE_BEGIN dir!=0 branch).
+    // TEST_BYE/idle-expiry/fresh-HELLO additionally clear this back to -1 as
+    // part of a full session teardown, so a later, genuinely new session can
+    // reuse phase numbers freely.
+    g_resp.last_rev_phase_done = g_rev.phase;
     g_rev.active = false;
 }
 
@@ -479,6 +497,10 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         // pathological case of a same-address reconnect while our reverse
         // phase to the old session is still in flight.
         if (g_rev.active) rev_stop(loop);
+        // A genuinely new session must be able to reuse any phase number --
+        // rev_stop() above (or an earlier one) may just have set this from
+        // the OLD session, and it must not haunt this one.
+        g_resp.last_rev_phase_done = -1;
         g_resp.last_rx_us = get_current_time_us();
         note_fd_ep(w, src);
         mylog(log_info, "test: session from %s\n", src.get_str());
@@ -486,6 +508,10 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         int ack_len = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE);
         responder_send(w->fd, src, TEST_HELLO_ACK, 0, ack, ack_len);
         g_hello_ack_sent_us = get_current_time_us();
+        // A new session's grace-period sizing must not reuse a stale RTT from
+        // a previous peer/session: the ==0 guard below only computes this once
+        // per process lifetime otherwise.
+        g_pr_rtt_hint_us = 0;
 
     } else if (mt == TEST_PHASE_BEGIN) {
         uint32_t expected_n = 0, pps = 0, dir = 0, spread = 0;
@@ -517,6 +543,22 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             // would replay the whole phase and manufacture huge phantom loss.
             if (g_rev.active && g_rev.phase == h.phase) {
                 g_rev.last_peer_rx_us = get_current_time_us();
+                responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
+                return;
+            }
+            // A keepalive can race the phase's own natural teardown: probes
+            // done, grace elapsed, all 3 PHASE_END copies sent, g_rev.active
+            // already false by the time this arrives. Without this check that
+            // falls through to the bounds check below and restarts the WHOLE
+            // phase under the same number. In the finished tool's phase order
+            // (S1 -> S2 -> S3 -> S4) a replayed S2 would run concurrently with
+            // S3's upstream measurement, inflating S3's loss on any shared
+            // bottleneck and misreporting port-range mode as worse than it is
+            // -- exactly the wrong-conclusion failure mode this feature exists
+            // to avoid. Re-ACK so the prober's retry stops, start nothing.
+            if (g_resp.last_rev_phase_done == (int)h.phase) {
+                mylog(log_debug, "test: stray keepalive for already-finished reverse "
+                                 "phase %d, re-acking without restarting\n", h.phase);
                 responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
                 return;
             }
@@ -591,6 +633,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.active = false;
         g_resp.phase_open = false;
         if (g_rev.active) rev_stop(loop);
+        g_resp.last_rev_phase_done = -1;
         for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
     }
 }
@@ -612,6 +655,7 @@ static void responder_timer_cb(struct ev_loop *loop, struct ev_timer *w, int rev
             g_resp.active = false;
             g_resp.phase_open = false;
             if (g_rev.active) rev_stop(loop);
+            g_resp.last_rev_phase_done = -1;
             for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
             return;
         }
