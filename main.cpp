@@ -95,7 +95,8 @@ static void print_help() {
     printf("                                          prober:    -c --test-mode -r <ip:port>  (prints the report)\n");
     printf("    --test-duration       <sec>           per-phase probe duration, default: 30, max: 600.\n");
     printf("    --test-pps            <number>        probe packet rate, default: 200, max: 20000.\n");
-    printf("    --test-pkt-size       <number>        probe packet size, default: 1200, min: 64, max: 1400.\n");
+    printf("    --test-pkt-size       <number>        probe packet size, default: 1200, min: 64, max: 1400. prober-side only:\n");
+    printf("                                          it is carried in the handshake, so both directions are measured at it.\n");
     printf("    --test-app-mbps       <number>        your real payload rate, used to convert redundancy overhead into\n");
     printf("                                          absolute bandwidth. default: the probe rate itself.\n");
     printf("    --test-no-reverse                     skip the server -> client phases. only needed on the prober;\n");

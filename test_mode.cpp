@@ -117,6 +117,7 @@ int test_phase_begin_pack(char *out, const test_phase_begin_t &b) {
     write_u32(out + 8,  b.dir);
     write_u32(out + 12, b.spread);
     write_u32(out + 16, b.cookie);
+    write_u32(out + 20, b.pkt_size);
     return TEST_PHASE_BEGIN_PL_LEN;
 }
 
@@ -130,9 +131,17 @@ int test_phase_begin_unpack(const uint8_t *pl, int pl_len, test_phase_begin_t *o
     // Each optional word is gated on its own end offset, so a payload that
     // stops anywhere past the mandatory 12 bytes decodes what it does carry and
     // leaves the rest at 0 -- never reading past the datagram.
-    if (pl_len >= 16) out->spread = read_u32(p + 12);
-    if (pl_len >= 20) out->cookie = read_u32(p + 16);
+    if (pl_len >= 16) out->spread   = read_u32(p + 12);
+    if (pl_len >= 20) out->cookie   = read_u32(p + 16);
+    if (pl_len >= 24) out->pkt_size = read_u32(p + 20);
     return 0;
+}
+
+int test_clamp_probe_size(uint32_t want, int fallback) {
+    if (want == 0) return fallback;
+    if (want < (uint32_t)TEST_PKT_SIZE_MIN) return TEST_PKT_SIZE_MIN;
+    if (want > (uint32_t)TEST_PKT_SIZE_MAX) return TEST_PKT_SIZE_MAX;
+    return (int)want;
 }
 
 int test_hello_ack_accept_pack(char *out, u32_t caps, u32_t cookie) {
@@ -150,6 +159,15 @@ u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len) {
 u32_t test_hello_ack_cookie(const uint8_t *pl, int pl_len) {
     if (pl_len < TEST_HELLO_ACK_ACCEPT_LEN) return 0u;
     return read_u32((char *)pl + 8);
+}
+
+void test_phase_ack_pack(char *out, uint32_t ports) {
+    write_u32(out + 0, ports);
+}
+
+uint32_t test_phase_ack_ports(const uint8_t *pl, int pl_len) {
+    if (pl_len < TEST_PHASE_ACK_PL_LEN) return 0u;
+    return read_u32((char *)pl + 0);
 }
 
 // ---------------- loss trace + statistics ----------------
@@ -577,20 +595,40 @@ void test_render_report(const test_report_t &r) {
                 printf("    结论: 上行单端口已无丢包,无法判断 port-range 收益\n");
         }
         if (r.have_spread_down) {
-            // spread_ports_down is what the prober requested, not a confirmed
-            // per-port count -- the responder may have silently answered from
-            // fewer fds (see the comment on the field in test_mode.h), so the
-            // label says "配置" (as configured), never implying it was verified.
+            // spread_ports_down is the count the responder reported it actually
+            // sent from, which can be smaller than the requested count when a
+            // data port never saw this peer. Printing the requested number here
+            // would compare single-port loss against a figure that may have been
+            // measured over one port -- so show what was really used, and say so
+            // whenever the two disagree.
             double base = r.have_down ? r.down.stats.loss_rate : 0.0;
-            printf("  下行  单端口 %.4f%%  |  配置 %d 端口 %.4f%%\n",
-                   base * 100.0, r.spread_ports_down, r.spread_loss_down * 100.0);
-            if (base > 0.0 && r.spread_loss_down < base)
-                printf("    结论: 多端口降低下行丢包 %.0f%%,port-range 对该方向有效\n",
-                       (base - r.spread_loss_down) / base * 100.0);
-            else if (base > 0.0)
-                printf("    结论: 多端口未降低下行丢包,port-range 对该方向无收益\n");
+            int used = r.spread_ports_down;
+            int req  = r.spread_ports_down_req;
+            if (used == 0)
+                printf("  下行  单端口 %.4f%%  |  请求 %d 端口(对端实际参与数未知) %.4f%%\n",
+                       base * 100.0, req, r.spread_loss_down * 100.0);
+            else if (used != req)
+                printf("  下行  单端口 %.4f%%  |  实际 %d 端口(请求 %d) %.4f%%\n",
+                       base * 100.0, used, req, r.spread_loss_down * 100.0);
             else
+                printf("  下行  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
+                       base * 100.0, used, r.spread_loss_down * 100.0);
+
+            if (used == 1) {
+                // Not a multi-port measurement at all: whatever the numbers do,
+                // they cannot be attributed to port-range.
+                printf("    结论: 对端实际只用 1 个端口回打,该行并非多端口对比,"
+                       "无法判断 port-range 下行收益\n");
+            } else if (used == 0) {
+                printf("    结论: 对端未报告实际参与端口数,该差异不能归因于 port-range\n");
+            } else if (base > 0.0 && r.spread_loss_down < base) {
+                printf("    结论: %d 端口降低下行丢包 %.0f%%,port-range 对该方向有效\n",
+                       used, (base - r.spread_loss_down) / base * 100.0);
+            } else if (base > 0.0) {
+                printf("    结论: %d 端口未降低下行丢包,port-range 对该方向无收益\n", used);
+            } else {
                 printf("    结论: 下行单端口已无丢包,无法判断 port-range 收益\n");
+            }
         }
     }
 
@@ -768,9 +806,50 @@ int test_mode_selftest() {
                "same ip with different ports must compare equal by ip");
         TCHECK(!test_addr_same_ip(a, c), "different ips must not compare equal by ip");
         TCHECK(test_addr_same_ip(a, a), "an address must compare equal to itself");
+
+        // The ipv6 branch: same code path, different union member. Untested it
+        // could compare the wrong 16 bytes and either split one peer (S3/S4
+        // report ~100% loss) or merge two.
+        char s6a[] = "[fd00::1]:1000";
+        char s6b[] = "[fd00::1]:2000";
+        char s6c[] = "[fd00::2]:1000";
+        address_t a6, b6, c6;
+        a6.from_str(s6a);
+        b6.from_str(s6b);
+        c6.from_str(s6c);
+        TCHECK(test_addr_same_ip(a6, b6),
+               "ipv6: same ip with different ports must compare equal by ip");
+        TCHECK(!test_addr_same_ip(a6, c6),
+               "ipv6: different ips must not compare equal by ip");
+        TCHECK(!test_addr_same_ip(a6, a),
+               "an ipv4 and an ipv6 address must never compare equal by ip");
+
+        // The address-family guard, pinned by the one pair that makes it
+        // load-bearing. address_t::clear() zeroes the whole union, and an ipv4
+        // sockaddr leaves zeroes exactly where sockaddr_in6 keeps sin6_addr --
+        // so without the family check "[::]" would memcmp equal to EVERY ipv4
+        // address, and the responder's probe gate would accept probes from any
+        // ipv4 peer while pinned to an ipv6 one. Any other ipv6 value passes
+        // this by luck, which is why the unspecified address is used here.
+        char s6z[] = "[::]:1000";
+        address_t z6;
+        z6.from_str(s6z);
+        TCHECK(!test_addr_same_ip(z6, a),
+               "the unspecified ipv6 address must not compare equal to an ipv4 address");
+
+        // An address that was never filled in must compare equal to NOTHING.
+        // This is the default that guards the pinning gate: if it returned true,
+        // an unpinned session would accept probes from any source.
+        address_t none;
+        none.clear();
+        TCHECK(!none.is_vaild(), "a cleared address must not be valid");
+        TCHECK(!test_addr_same_ip(none, a),
+               "an invalid address must not compare equal to a valid one");
+        TCHECK(!test_addr_same_ip(none, none),
+               "two invalid addresses must not compare equal either");
     }
 
-    // ---- phase_begin / hello_ack payload codecs ----
+    // ---- phase_begin / hello_ack / phase_ack payload codecs ----
     {
         char pl[TEST_PHASE_BEGIN_PL_LEN];
         test_phase_begin_t src;
@@ -779,6 +858,7 @@ int test_mode_selftest() {
         src.dir        = 1;
         src.spread     = 1;
         src.cookie     = 0xdeadbeefu;
+        src.pkt_size   = 400;
         TCHECK(test_phase_begin_pack(pl, src) == TEST_PHASE_BEGIN_PL_LEN,
                "phase_begin pack must write %d bytes", TEST_PHASE_BEGIN_PL_LEN);
 
@@ -786,33 +866,53 @@ int test_mode_selftest() {
         TCHECK(test_phase_begin_unpack((const uint8_t *)pl, sizeof(pl), &got) == 0,
                "%d-byte phase_begin payload must unpack", TEST_PHASE_BEGIN_PL_LEN);
         TCHECK(got.expected_n == 1234 && got.pps == 200 && got.dir == 1 &&
-                   got.spread == 1 && got.cookie == 0xdeadbeefu,
+                   got.spread == 1 && got.cookie == 0xdeadbeefu && got.pkt_size == 400,
                "phase_begin fields must round-trip: got n=%u pps=%u dir=%u spread=%u "
-               "cookie=%u",
-               got.expected_n, got.pps, got.dir, got.spread, got.cookie);
+               "cookie=%u pkt_size=%u",
+               got.expected_n, got.pps, got.dir, got.spread, got.cookie, got.pkt_size);
 
         // Truncated payloads: each optional word must default to 0 rather than
         // being read out of a datagram that never carried it. A cookie read out
-        // of bounds could accidentally match and reopen the amplifier.
+        // of bounds could accidentally match and reopen the amplifier; a
+        // pkt_size read out of bounds would silently change the probe size.
         test_phase_begin_t g12;
-        g12.spread = g12.cookie = 7;   // must be overwritten
+        g12.spread = g12.cookie = g12.pkt_size = 7;   // must be overwritten
         TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 12, &g12) == 0,
                "12-byte legacy phase_begin payload must still unpack");
         TCHECK(g12.expected_n == 1234 && g12.pps == 200 && g12.dir == 1,
                "12-byte payload must still decode the three mandatory words");
-        TCHECK(g12.spread == 0 && g12.cookie == 0,
-               "12-byte payload must default spread/cookie to 0, got %u/%u",
-               g12.spread, g12.cookie);
+        TCHECK(g12.spread == 0 && g12.cookie == 0 && g12.pkt_size == 0,
+               "12-byte payload must default spread/cookie/pkt_size to 0, got %u/%u/%u",
+               g12.spread, g12.cookie, g12.pkt_size);
 
         test_phase_begin_t g16;
         TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 16, &g16) == 0,
                "16-byte phase_begin payload must unpack");
-        TCHECK(g16.spread == 1 && g16.cookie == 0,
-               "16-byte payload must decode spread but default the cookie to 0, "
-               "got spread=%u cookie=%u", g16.spread, g16.cookie);
+        TCHECK(g16.spread == 1 && g16.cookie == 0 && g16.pkt_size == 0,
+               "16-byte payload must decode spread but default cookie/pkt_size to 0, "
+               "got spread=%u cookie=%u pkt_size=%u", g16.spread, g16.cookie, g16.pkt_size);
+
+        test_phase_begin_t g20;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 20, &g20) == 0,
+               "20-byte phase_begin payload must unpack");
+        TCHECK(g20.cookie == 0xdeadbeefu && g20.pkt_size == 0,
+               "20-byte payload must decode the cookie but default pkt_size to 0, "
+               "got cookie=%u pkt_size=%u", g20.cookie, g20.pkt_size);
 
         TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 11, &got) == -1,
                "a payload shorter than 12 bytes must be rejected");
+
+        // Peer-supplied probe size is clamped to this build's own limits: an
+        // out-of-range value would make test_encode refuse every probe and turn
+        // the whole reverse phase into silence.
+        TCHECK(test_clamp_probe_size(400, 1200) == 400,
+               "an in-range probe size must be used as-is");
+        TCHECK(test_clamp_probe_size(0, 1200) == 1200,
+               "probe size 0 means 'peer sent none' and must fall back to the local value");
+        TCHECK(test_clamp_probe_size(1, 1200) == TEST_PKT_SIZE_MIN,
+               "an undersized probe size must clamp up to the minimum");
+        TCHECK(test_clamp_probe_size(65535, 1200) == TEST_PKT_SIZE_MAX,
+               "an oversized probe size must clamp down to the maximum");
 
         // HELLO_ACK: accept path carries caps and the session cookie; the reject
         // path is unchanged, so an old prober reading a reason string from
@@ -844,6 +944,14 @@ int test_mode_selftest() {
         write_u32(ack8 + 4, TEST_CAP_REVERSE);
         TCHECK(test_hello_ack_cookie((const uint8_t *)ack8, 8) == 0,
                "an 8-byte accept must report no cookie");
+
+        // PHASE_ACK: the participating-port count for a reverse phase.
+        char pack[TEST_PHASE_ACK_PL_LEN];
+        test_phase_ack_pack(pack, 4);
+        TCHECK(test_phase_ack_ports((const uint8_t *)pack, sizeof(pack)) == 4,
+               "phase_ack port count must round-trip");
+        TCHECK(test_phase_ack_ports((const uint8_t *)pack, 0) == 0,
+               "an empty phase_ack payload must report 0 (== not reported)");
     }
 
     // ---- trace + stats ----

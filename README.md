@@ -230,7 +230,7 @@ far finer than the tightest recommendation tier needs.
 |---|---|---|---|
 | `--test-duration <sec>` | 30 | 1–600 | duration of each full-length measurement pass |
 | `--test-pps <number>` | 200 | 1–20000 | probe packet rate |
-| `--test-pkt-size <number>` | 1200 | 64–1400 | probe packet size |
+| `--test-pkt-size <number>` | 1200 | 64–1400 | probe packet size, **both** directions; prober-side only — it is carried in the handshake, so the responder pads its server → client probes to it too (clamped to the responder's own 64–1400 range) |
 | `--test-app-mbps <number>` | probe rate | — | your real payload rate; used only to convert redundancy overhead into an absolute Mbps figure |
 | `--test-no-reverse` | off (reverse runs) | — | skip the server → client phases; prober-side only, the responder always supports them |
 | `--test-selftest` | — | — | run the evaluator's self-checks against synthetic traces and exit; touches no network |
@@ -290,7 +290,13 @@ The report contains, in order:
    loss.
 5. **Port-range comparison**, only when `--data-port-range` was given:
    single-port vs. N-port loss for each direction, and whether port-range
-   mode would help on this link.
+   mode would help on this link. For the server → client row the port count
+   shown is the number of ports the responder reports it *actually* sent
+   from, which can be lower than the number requested — a data port that
+   never saw this client has no NAT mapping to answer through and is left
+   out. When it is lower, or when the responder never reported it, the report
+   says so and withholds the "port-range helps" conclusion rather than
+   crediting a difference that may have been measured over a single port.
 6. **A suggested command line** for the balanced tier of each measured
    direction.
 

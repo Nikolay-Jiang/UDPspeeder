@@ -197,6 +197,11 @@ struct rev_send_t {
     uint32_t  sent = 0;
     uint32_t  send_fail = 0;
     uint32_t  pps = 0;
+    // Padded size of this phase's probes, taken from the prober's PHASE_BEGIN
+    // (clamped to our own limits) rather than from our local --test-pkt-size:
+    // the report describes the downstream direction with the PROBER's size, and
+    // packet size materially changes loss on MTU-constrained and policed links.
+    int       pkt_size = 0;
     pacer_t   pacer;
     my_time_t last_peer_rx_us = 0;
     // fds[k] is paired with dsts[k]: each fd must reply to the address that fd
@@ -399,7 +404,7 @@ static void rev_tick_cb(struct ev_loop *loop, struct ev_timer *w, int revents) {
                      get_fake_random_number() % 10000 < (u32_t)random_drop);
         if (!drop)
             responder_send_ex(g_rev.fds[k], g_rev.dsts[k], TEST_PROBE, g_rev.phase,
-                              g_rev.sent, NULL, 0, test_pkt_size);
+                              g_rev.sent, NULL, 0, g_rev.pkt_size);
         g_rev.sent++;
     }
 
@@ -588,9 +593,14 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             // reverse phase (it is otherwise silent). Re-ACK and return
             // WITHOUT touching the pacer or the counters: restarting them
             // would replay the whole phase and manufacture huge phantom loss.
+            // The re-ACK still carries the participating-port count, so a
+            // prober whose original ACK was lost can still learn it and does
+            // not have to fall back to reporting the count as unknown.
             if (g_rev.active && g_rev.phase == h.phase) {
                 g_rev.last_peer_rx_us = get_current_time_us();
-                responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
+                char ack_pl[TEST_PHASE_ACK_PL_LEN];
+                test_phase_ack_pack(ack_pl, (uint32_t)g_rev.fds.size());
+                responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, ack_pl, sizeof(ack_pl));
                 return;
             }
             // A keepalive can race the phase's own natural teardown: probes
@@ -606,7 +616,12 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             if (g_resp.last_rev_phase_done == (int)h.phase) {
                 mylog(log_debug, "test: stray keepalive for already-finished reverse "
                                  "phase %d, re-acking without restarting\n", h.phase);
-                responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
+                // g_rev still holds the finished phase's fd list (rev_stop only
+                // clears `active`), and this ACK is for that same phase number,
+                // so the count it reports is the one that actually ran.
+                char ack_pl[TEST_PHASE_ACK_PL_LEN];
+                test_phase_ack_pack(ack_pl, (uint32_t)g_rev.fds.size());
+                responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, ack_pl, sizeof(ack_pl));
                 return;
             }
             // The responder is a traffic source here, so it bounds rate and
@@ -637,6 +652,15 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             g_rev.phase  = h.phase;
             g_rev.total  = expected_n;
             g_rev.pps    = pps;
+            // Peer-chosen, so clamped to our own legal range before use. A
+            // legacy PHASE_BEGIN carries no size (0) and falls back to the local
+            // --test-pkt-size, which is the pre-existing behaviour.
+            g_rev.pkt_size = test_clamp_probe_size(b.pkt_size, test_pkt_size);
+            if (b.pkt_size != 0 && g_rev.pkt_size != (int)b.pkt_size) {
+                mylog(log_warn, "test: reverse phase %d asked for %u-byte probes, "
+                                "clamped to %d\n",
+                      (int)h.phase, b.pkt_size, g_rev.pkt_size);
+            }
             g_rev.last_peer_rx_us = get_current_time_us();
             g_rev.pacer.init((double)pps, get_current_time_us());
             if (spread != 0 && g_data_eps.size() > 1) {
@@ -672,9 +696,18 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
                 g_rev.dsts.push_back(g_resp.peer);
             }
 
-            mylog(log_info, "test: reverse phase %d begin, sending %u probes at %u pps\n",
-                  h.phase, expected_n, pps);
-            responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, NULL, 0);
+            mylog(log_info, "test: reverse phase %d begin, sending %u probes at %u pps, "
+                            "%dB each\n",
+                  h.phase, expected_n, pps, g_rev.pkt_size);
+            // The ACK reports how many ports this phase will really use, which
+            // can be fewer than the prober asked for. Without it the report
+            // could only print the requested count next to a loss figure that
+            // may have been measured over a single port.
+            {
+                char ack_pl[TEST_PHASE_ACK_PL_LEN];
+                test_phase_ack_pack(ack_pl, (uint32_t)g_rev.fds.size());
+                responder_send(w->fd, src, TEST_PHASE_ACK, h.phase, ack_pl, sizeof(ack_pl));
+            }
             ev_init(&g_rev_tick, rev_tick_cb);
             ev_timer_set(&g_rev_tick, REV_TICK_SEC, REV_TICK_SEC);
             ev_timer_start(loop, &g_rev_tick);
@@ -937,6 +970,7 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
     // No cookie on an upstream phase: we are the traffic source there, so there
     // is nothing for a return-routability check to protect, and requiring one
     // would break compatibility with responders that never mint one.
+    b.pkt_size   = (uint32_t)test_pkt_size;
     char begin_pl[TEST_PHASE_BEGIN_PL_LEN];
     test_phase_begin_pack(begin_pl, b);
 
@@ -973,6 +1007,11 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
             next_tick = now;
         }
 
+        // Deliberately re-reads the clock instead of reusing `now` from above:
+        // `now` was sampled BEFORE the usleep, so reusing it would leave the
+        // sleep outside the pacer's measured interval and the pacer would
+        // credit ~0us per iteration, stalling the phase. Do not "simplify" this
+        // into `pacer.tick(now)` -- it silently changes the pacer's time base.
         int budget = pacer.tick(get_current_time_us());
         for (int b = 0; b < budget && sent < total; b++) {
             const address_t &d = dests[rr % dests.size()];
@@ -1047,7 +1086,8 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
 // concrete-looking number is the worst failure mode this feature has.
 static bool prober_run_reverse_phase(int phase, uint32_t pps, int duration_sec,
                                       bool spread, trace_t *trace_out,
-                                      uint32_t *peer_send_fail_out) {
+                                      uint32_t *peer_send_fail_out,
+                                      int *ports_used_out) {
     uint32_t total = pps * (uint32_t)duration_sec;
     test_phase_begin_t b;
     b.expected_n = total;
@@ -1058,39 +1098,113 @@ static bool prober_run_reverse_phase(int phase, uint32_t pps, int duration_sec,
     // refuses -- silently -- any dir=1 phase whose cookie does not match, which
     // is what stops it being used as a spoofed-source amplifier.
     b.cookie     = g_pr.session_cookie;
+    // Ask for OUR probe size, so the direction is measured at the size the
+    // report claims rather than at whatever the responder was started with.
+    b.pkt_size   = (uint32_t)test_pkt_size;
     char begin_pl[TEST_PHASE_BEGIN_PL_LEN];
     test_phase_begin_pack(begin_pl, b);
+
+    // The trace is initialised BEFORE the handshake, and probes are recorded
+    // while we are still waiting for the ACK.
+    //
+    // The responder sends PHASE_ACK and then arms its 1ms sender, so probes are
+    // on the wire ~1ms after the ACK. If the ACK is lost, this used to spend the
+    // whole 1000ms timeout discarding those probes and then re-init the trace,
+    // counting every discarded sequence number as lost -- 200 probes at the
+    // default 200pps, i.e. 3.33% of phantom downstream loss, on a report that
+    // then recommends a heavier -f for the server end. And control-packet loss
+    // is MORE likely on exactly the lossy links this tool exists for. The
+    // responder's keepalive branch correctly does not restart the pacer, so
+    // those probes are never re-sent: recording them here is the only way they
+    // are ever counted.
+    trace_out->init(total, pps);
+    *peer_send_fail_out = 0;
+    *ports_used_out     = 0;
+
+    my_time_t last_probe_us  = 0;
+    uint32_t  arrived        = 0;
+    bool      got_end        = false;
+
+    // ---- begin/ack, recording arrivals throughout ----
+    //
+    // Deliberately not prober_exchange(): that helper discards every message
+    // that is not the one it is waiting for, which is exactly the bug above.
+    // The upstream path keeps using it unchanged -- there the prober is the
+    // sender, so nothing arrives during the ACK wait that could be lost.
+    const int BEGIN_ATTEMPTS   = 5;
+    const int BEGIN_TIMEOUT_MS = 1000;
+    bool acked = false;
+    for (int attempt = 0; attempt < BEGIN_ATTEMPTS && !acked; attempt++) {
+        my_time_t t0 = get_current_time_us();
+        prober_sendto(TEST_PHASE_BEGIN, phase, 0, begin_pl, sizeof(begin_pl),
+                      g_pr.peer, 0);
+        while ((int)((get_current_time_us() - t0) / 1000) < BEGIN_TIMEOUT_MS) {
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 20 * 1000;
+            fd_set rf;
+            FD_ZERO(&rf);
+            FD_SET(g_pr.fd, &rf);
+            int sr = select(g_pr.fd + 1, &rf, NULL, NULL, &tv);
+            if (sr <= 0) continue;
+            for (;;) {
+                char buf[TEST_BUF_MAX];
+                int len = recv(g_pr.fd, buf, sizeof(buf), 0);
+                if (len <= 0) break;
+                test_hdr_t h;
+                uint8_t *pl = 0;
+                int pl_len = 0;
+                int mt = test_decode(buf, len, &h, &pl, &pl_len);
+                if (mt < 0 || h.phase != (uint8_t)phase) continue;
+                if (mt == TEST_PHASE_ACK) {
+                    acked = true;
+                    g_pr.rtt_us = get_current_time_us() - t0;
+                    *ports_used_out = (int)test_phase_ack_ports(pl, pl_len);
+                } else if (mt == TEST_PROBE) {
+                    last_probe_us = get_current_time_us();
+                    trace_out->record(h.seq, last_probe_us);
+                    arrived++;
+                } else if (mt == TEST_PHASE_END) {
+                    if (pl_len >= 8) *peer_send_fail_out = read_u32((char *)pl + 4);
+                    got_end = true;
+                }
+            }
+            // Probes arriving are stronger evidence the phase started than the
+            // ACK is; stop retrying either way, but keep whatever we recorded.
+            if (acked || arrived > 0 || got_end) break;
+        }
+        if (!acked && arrived == 0 && !got_end)
+            mylog(log_debug, "test: no ack for reverse phase %d after attempt %d\n",
+                  phase, attempt + 1);
+    }
 
     // Unlike an upstream phase, a missing ACK here is NOT fatal: the responder
     // deliberately withholds it when it will not run the phase (no data port
     // has seen this peer, or the session cookie did not match). Treat it as
     // "this direction was not measured" and let the caller say so, rather than
     // killing a run that has already produced good upstream data.
-    if (!prober_exchange(TEST_PHASE_BEGIN, phase, begin_pl, sizeof(begin_pl),
-                          TEST_PHASE_ACK, 1000, 5, NULL, NULL)) {
+    if (!acked && arrived == 0 && !got_end) {
         mylog(log_warn, "test: responder did not ack reverse phase %d; "
                         "treating this direction as not measured\n", phase);
-        trace_out->init(1, pps);   // caller may still read it; keep it valid
-        *peer_send_fail_out = 0;
         return false;
     }
+    if (!acked)
+        mylog(log_warn, "test: reverse phase %d ack was lost, but probes are arriving; "
+                        "continuing (participating port count may stay unknown)\n", phase);
 
     mylog(log_info, "test: reverse phase %d running -- expecting %u probes at %u pps\n",
           phase, total, pps);
 
-    trace_out->init(total, pps);
-    *peer_send_fail_out = 0;
-
-    my_time_t start_us       = get_current_time_us();
-    my_time_t last_probe_us  = 0;
-    my_time_t last_keepalive = start_us;
-    uint32_t  arrived        = 0;
-    bool      got_end        = false;
+    // Re-based to the end of the handshake: the retry loop above may have burnt
+    // several seconds, and charging those to the phase's own budget would cut
+    // the measurement short and count the tail as loss.
+    my_time_t run_start_us   = get_current_time_us();
+    my_time_t last_keepalive = run_start_us;
 
     // Hard ceiling so a peer that ACKs and then stalls cannot hang the run.
     // The phase itself may legitimately run long (the responder re-bases its
     // pacer rather than dropping probes), so allow generous slack.
-    my_time_t deadline_us = start_us +
+    my_time_t deadline_us = run_start_us +
         (my_time_t)(duration_sec + 30) * 1000000ULL;
     // If nothing at all arrives this soon after the ACK, the peer is not
     // sending -- bail early rather than waiting out the whole duration.
@@ -1099,7 +1213,7 @@ static bool prober_run_reverse_phase(int phase, uint32_t pps, int duration_sec,
     while (get_current_time_us() < deadline_us) {
         my_time_t now = get_current_time_us();
 
-        if (arrived == 0 && now - start_us > FIRST_PROBE_LIMIT_US) break;
+        if (arrived == 0 && now - run_start_us > FIRST_PROBE_LIMIT_US) break;
         if (got_end) break;
         // Idle finalize, mirroring the responder's fallback: five inter-packet
         // gaps, floored at 2s, in case all three PHASE_END copies were lost.
@@ -1147,6 +1261,11 @@ static bool prober_run_reverse_phase(int phase, uint32_t pps, int duration_sec,
             } else if (mt == TEST_PHASE_END) {
                 if (pl_len >= 8) *peer_send_fail_out = read_u32((char *)pl + 4);
                 got_end = true;
+            } else if (mt == TEST_PHASE_ACK && *ports_used_out == 0) {
+                // A keepalive re-ACK. Only consulted while the count is still
+                // unknown (the original ACK was lost), so a late duplicate can
+                // never overwrite a count we already have.
+                *ports_used_out = (int)test_phase_ack_ports(pl, pl_len);
             }
         }
     }
@@ -1294,8 +1413,9 @@ int test_mode_prober_loop() {
     } else {
         trace_t down_trace;
         uint32_t peer_fail = 0;
+        int      ports_used = 0;   // single-port phase; not reported
         if (prober_run_reverse_phase(2, (uint32_t)test_pps, test_duration_sec,
-                                      false, &down_trace, &peer_fail)) {
+                                      false, &down_trace, &peer_fail, &ports_used)) {
             rep.have_down = true;
             rep.down = test_evaluate(down_trace, rep.app_mbps, rep.pkt_size);
             rep.down_peer_send_fail_n  = peer_fail;
@@ -1316,12 +1436,23 @@ int test_mode_prober_loop() {
         if (rep.down_status == test_report_t::DOWN_OK && rep.have_down) {
             trace_t d4;
             uint32_t fail4 = 0;
+            int      ports4 = 0;
             if (prober_run_reverse_phase(4, (uint32_t)test_pps, test_duration_sec,
-                                          true, &d4, &fail4)) {
+                                          true, &d4, &fail4, &ports4)) {
                 trace_stats_t s4 = trace_analyze(d4);
-                rep.have_spread_down  = true;
-                rep.spread_loss_down  = s4.loss_rate;
-                rep.spread_ports_down = (int)spread.size();
+                rep.have_spread_down      = true;
+                rep.spread_loss_down      = s4.loss_rate;
+                // What the responder reported it ACTUALLY sent from (0 = it
+                // never told us), never our own request: a data port that never
+                // saw this peer is excluded, and printing the requested count
+                // would compare single-port loss against a figure that may have
+                // been measured over one port.
+                rep.spread_ports_down     = ports4;
+                rep.spread_ports_down_req = (int)spread.size();
+                if (ports4 != 0 && ports4 != (int)spread.size())
+                    mylog(log_warn, "test: responder used %d of the %d requested ports for "
+                                    "the downstream port-range phase\n",
+                          ports4, (int)spread.size());
             } else {
                 mylog(log_warn, "test: multi-port reverse phase produced no data; "
                                 "skipping the downstream port-range comparison\n");

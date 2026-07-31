@@ -110,7 +110,7 @@ bool test_addr_same_ip(address_t a, address_t b);
 // Capability bits advertised by the responder in HELLO_ACK's accept path.
 const u32_t TEST_CAP_REVERSE = 1u << 0;   // supports dir=1 (server -> client) phases
 
-// PHASE_BEGIN payload: five big-endian u32s. Only the first three are mandatory
+// PHASE_BEGIN payload: six big-endian u32s. Only the first three are mandatory
 // -- an old responder validates `pl_len < 12` and reads exactly those -- so
 // every later word is append-only and backward compatible in both directions.
 //
@@ -120,7 +120,12 @@ const u32_t TEST_CAP_REVERSE = 1u << 0;   // supports dir=1 (server -> client) p
 //                          token, echoed from HELLO_ACK. Mandatory for dir=1,
 //                          ignored for dir=0 (see the note on responder_state_t
 //                          ::cookie in test_mode_net.cpp).
-const int TEST_PHASE_BEGIN_PL_LEN = 20;
+//   pkt_size             : padded size the PROBE packets of this phase must
+//                          use. Carried on the wire so the reverse direction is
+//                          measured at the size the report claims, rather than
+//                          at whatever --test-pkt-size the responder happens to
+//                          have been started with.
+const int TEST_PHASE_BEGIN_PL_LEN = 24;
 
 struct test_phase_begin_t {
     uint32_t expected_n = 0;
@@ -128,6 +133,7 @@ struct test_phase_begin_t {
     uint32_t dir        = 0;
     uint32_t spread     = 0;
     uint32_t cookie     = 0;
+    uint32_t pkt_size   = 0;
 };
 
 // Returns the number of bytes written (TEST_PHASE_BEGIN_PL_LEN).
@@ -136,6 +142,13 @@ int test_phase_begin_pack(char *out, const test_phase_begin_t &b);
 // first three defaults to 0 when the payload stops short of it, so a legacy
 // (12- or 16-byte) sender decodes without reading past its own payload.
 int test_phase_begin_unpack(const uint8_t *pl, int pl_len, test_phase_begin_t *out);
+
+// Clamp a peer-supplied probe size into this build's legal range. `want == 0`
+// means the peer sent no size at all (legacy PHASE_BEGIN), in which case the
+// local configuration is used. Peer-controlled input, so it is never trusted
+// raw: an oversized value would be refused by test_encode and turn the whole
+// reverse phase into silence.
+int test_clamp_probe_size(uint32_t want, int fallback);
 
 // HELLO_ACK accept path: reject code 0, a capability word, then a per-session
 // random cookie. The reject path keeps the old layout (code + reason string)
@@ -148,6 +161,19 @@ u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len);
 // 0 when the peer sent no cookie (an accept from an older build). 0 is never a
 // valid cookie, so it cannot be replayed as one.
 u32_t test_hello_ack_cookie(const uint8_t *pl, int pl_len);
+
+// PHASE_ACK payload, sent only for dir=1 phases: the number of ports the
+// responder will ACTUALLY send this phase from. It can be smaller than the
+// requested count, because a data fd that never saw this peer has no nat
+// mapping to reply through and is excluded. Without this on the wire the report
+// could only print the requested number while comparing a figure that may have
+// been measured over a single port.
+const int TEST_PHASE_ACK_PL_LEN = 4;
+void     test_phase_ack_pack(char *out, uint32_t ports);
+// 0 means "the peer did not report it" (upstream phase, or an older build) --
+// never "zero ports", which cannot happen since a phase with no usable fd is
+// refused outright.
+uint32_t test_phase_ack_ports(const uint8_t *pl, int pl_len);
 
 struct trace_stats_t {
     uint32_t n;
@@ -260,13 +286,18 @@ struct test_report_t {
     int    spread_ports;
     bool   have_spread_down;
     double spread_loss_down;
-    // The port count the prober REQUESTED for the reverse phase (spread.size()),
-    // not a confirmed count of ports that carried traffic: the responder may
-    // silently use fewer fds when some data port never saw this peer (its nat
-    // mapping never formed, see g_data_eps in test_mode_net.cpp), and that
-    // narrower actual count never crosses the wire. Render this as a
-    // configured/requested figure, not a measured one.
+    // The port count the responder ACTUALLY sent the reverse phase from,
+    // reported back over TEST_PHASE_ACK. It can be smaller than
+    // spread_ports_down_req: a data fd that never saw this peer has no nat
+    // mapping to reply through and is excluded (see g_data_eps in
+    // test_mode_net.cpp). 0 means the peer never told us -- every PHASE_ACK for
+    // that phase was lost, or it is an older build -- in which case the report
+    // must say the count is unknown rather than print the requested one as if
+    // it had been confirmed.
     int    spread_ports_down;
+    // What the prober asked for, kept alongside so the report can show both
+    // when they disagree instead of quietly comparing against a narrower run.
+    int    spread_ports_down_req;
 };
 
 void test_render_report(const test_report_t &r);
