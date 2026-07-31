@@ -148,6 +148,18 @@ struct data_ep_t {
 };
 static std::vector<data_ep_t> g_data_eps;
 
+// Records `src` as the peer most recently seen on watcher `w`'s fd. Callers
+// must only reach this once the packet is already known-accepted (mac-valid
+// and pinned) -- see the two call sites in responder_cb for why each of them
+// qualifies.
+static void note_fd_ep(ev_io *w, const address_t &src) {
+    size_t fd_idx = (size_t)(intptr_t)w->data;
+    if (fd_idx < g_data_eps.size()) {
+        g_data_eps[fd_idx].seen = true;
+        g_data_eps[fd_idx].addr = src;
+    }
+}
+
 // ---------------- HELLO / HELLO_ACK payloads ----------------
 //
 // HELLO carries the prober's --data-port-range as {count, first, last}, three
@@ -297,11 +309,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         // accepted -- doing it here unconditionally would let a mac-valid HELLO
         // from a non-pinned sender (e.g. aimed at a data fd, or one that fails
         // hello_pl_check) overwrite the table before its own rejection checks run.
-        size_t fd_idx = (size_t)(intptr_t)w->data;
-        if (fd_idx < g_data_eps.size()) {
-            g_data_eps[fd_idx].seen = true;
-            g_data_eps[fd_idx].addr = src;
-        }
+        note_fd_ep(w, src);
     }
 
     if (mt == TEST_HELLO) {
@@ -327,13 +335,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.peer = src;
         g_resp.phase_open = false;
         g_resp.last_rx_us = get_current_time_us();
-        {
-            size_t fd_idx = (size_t)(intptr_t)w->data;
-            if (fd_idx < g_data_eps.size()) {
-                g_data_eps[fd_idx].seen = true;
-                g_data_eps[fd_idx].addr = src;
-            }
-        }
+        note_fd_ep(w, src);
         mylog(log_info, "test: session from %s\n", src.get_str());
         char ack[4];
         write_u32(ack, (u32_t)TEST_REJECT_NONE);
