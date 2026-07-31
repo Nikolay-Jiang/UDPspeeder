@@ -531,7 +531,7 @@ void test_render_report(const test_report_t &r) {
             printf("  本端会把它们计为丢包,因此上方 server -> client 丢包率可能被高估;\n");
             printf("  这部分并非链路丢包。注意需要调整的是**对端**的负载,而非本端 --test-pps。\n");
         }
-    } else {
+    } else if (r.down_status != test_report_t::DOWN_OK) {
         printf("\n--- 链路特征 (server -> client, 单端口) ---\n");
         switch (r.down_status) {
             case test_report_t::DOWN_DISABLED:
