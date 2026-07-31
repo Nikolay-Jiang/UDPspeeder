@@ -240,7 +240,13 @@ struct test_report_t {
     int    spread_ports;
     bool   have_spread_down;
     double spread_loss_down;
-    int    spread_ports_down;   // ports that actually carried traffic, may be < N
+    // The port count the prober REQUESTED for the reverse phase (spread.size()),
+    // not a confirmed count of ports that carried traffic: the responder may
+    // silently use fewer fds when some data port never saw this peer (its nat
+    // mapping never formed, see g_data_eps in test_mode_net.cpp), and that
+    // narrower actual count never crosses the wire. Render this as a
+    // configured/requested figure, not a measured one.
+    int    spread_ports_down;
 };
 
 void test_render_report(const test_report_t &r);

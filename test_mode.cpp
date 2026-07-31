@@ -555,7 +555,7 @@ void test_render_report(const test_report_t &r) {
         printf("\n--- port-range 对比 ---\n");
         if (r.have_spread) {
             double base = r.have_up ? r.up.stats.loss_rate : 0.0;
-            printf("  上行  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
+            printf("  上行  单端口 %.4f%%  |  配置 %d 端口 %.4f%%\n",
                    base * 100.0, r.spread_ports, r.spread_loss_up * 100.0);
             if (base > 0.0 && r.spread_loss_up < base)
                 printf("    结论: 多端口降低上行丢包 %.0f%%,port-range 对该方向有效\n",
@@ -566,8 +566,12 @@ void test_render_report(const test_report_t &r) {
                 printf("    结论: 上行单端口已无丢包,无法判断 port-range 收益\n");
         }
         if (r.have_spread_down) {
+            // spread_ports_down is what the prober requested, not a confirmed
+            // per-port count -- the responder may have silently answered from
+            // fewer fds (see the comment on the field in test_mode.h), so the
+            // label says "配置" (as configured), never implying it was verified.
             double base = r.have_down ? r.down.stats.loss_rate : 0.0;
-            printf("  下行  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
+            printf("  下行  单端口 %.4f%%  |  配置 %d 端口 %.4f%%\n",
                    base * 100.0, r.spread_ports_down, r.spread_loss_down * 100.0);
             if (base > 0.0 && r.spread_loss_down < base)
                 printf("    结论: 多端口降低下行丢包 %.0f%%,port-range 对该方向有效\n",
