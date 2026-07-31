@@ -430,6 +430,56 @@ u32_t get_fake_random_number_nz()  // nz for non-zero
     return ret;
 }
 
+// Cryptographically unpredictable non-zero u32, backed by the kernel CSPRNG.
+//
+// Unlike get_fake_random_number*(), this MUST NOT come from my_random (mt19937).
+// The test-mode responder hands one of these to the peer in every accepted
+// HELLO_ACK as a return-routability cookie, and it accepts a mac-valid HELLO
+// from ANY source address -- so an off-path party who holds -k can request
+// cookies from its own address as fast as it likes. mt19937's tempering is
+// invertible, so ~624 such draws recover the generator's entire state and let
+// the attacker predict the next cookie, which is precisely the value that
+// authorises a reverse (dir=1) phase aimed at a spoofed victim. /dev/urandom
+// has no recoverable state, so the same harvest yields nothing.
+//
+// /dev/urandom (not getrandom(2)) is used deliberately: this project
+// cross-compiles to OpenWRT musl x86/x86_64 and /dev/urandom is the portable
+// choice across those toolchains. The fd is opened once and kept -- a mint
+// happens at most once per accepted HELLO, which is not a hot path.
+//
+// Failure is fatal, never a silent fall-back to my_random: degrading to the
+// exact weak source this defends against would reintroduce the defect while
+// looking like it still works. Retry on a zero draw so the "0 == cookie
+// absent / legacy peer" sentinel stays unambiguous.
+u32_t get_secure_random_number_nz() {
+    static int urandom_fd = -1;
+    if (urandom_fd == -1) {
+        urandom_fd = open("/dev/urandom", O_RDONLY);
+        if (urandom_fd == -1) {
+            mylog(log_fatal, "failed to open /dev/urandom: %s\n", get_sock_error());
+            myexit(-1);
+        }
+    }
+    u32_t ret = 0;
+    while (ret == 0) {
+        size_t got = 0;
+        while (got < sizeof(ret)) {
+            ssize_t r = read(urandom_fd, (char *)&ret + got, sizeof(ret) - got);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                mylog(log_fatal, "failed to read /dev/urandom: %s\n", get_sock_error());
+                myexit(-1);
+            }
+            if (r == 0) {
+                mylog(log_fatal, "unexpected EOF reading /dev/urandom\n");
+                myexit(-1);
+            }
+            got += (size_t)r;
+        }
+    }
+    return ret;
+}
+
 
 void setnonblocking(int sock) {
     int opts;

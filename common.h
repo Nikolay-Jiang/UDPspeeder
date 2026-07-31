@@ -369,6 +369,7 @@ void init_random_number_fd();
 u64_t get_fake_random_number_64();
 u32_t get_fake_random_number();
 u32_t get_fake_random_number_nz();
+u32_t get_secure_random_number_nz();
 bool larger_than_u16(uint16_t a, uint16_t b);
 bool larger_than_u32(u32_t a, u32_t b);
 void setnonblocking(int sock);

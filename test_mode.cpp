@@ -945,6 +945,24 @@ int test_mode_selftest() {
         TCHECK(test_hello_ack_cookie((const uint8_t *)ack8, 8) == 0,
                "an 8-byte accept must report no cookie");
 
+        // The session cookie is minted from the kernel CSPRNG. We cannot test
+        // unpredictability (untestable), but we CAN pin the two contract
+        // properties the mint site relies on: every draw is non-zero (so the
+        // "0 == cookie absent" sentinel is never produced) and the source is
+        // not a stuck constant. Sixteen identical CSPRNG draws is a ~1/2^480
+        // event, so this asserts liveness without depending on any particular
+        // value.
+        {
+            u32_t first = get_secure_random_number_nz();
+            bool all_same = true;
+            for (int i = 0; i < 16; i++) {
+                u32_t c = get_secure_random_number_nz();
+                TCHECK(c != 0, "secure cookie draw must never be zero");
+                if (c != first) all_same = false;
+            }
+            TCHECK(!all_same, "secure cookie draws must not all be identical");
+        }
+
         // PHASE_ACK: the participating-port count for a reverse phase.
         char pack[TEST_PHASE_ACK_PL_LEN];
         test_phase_ack_pack(pack, 4);

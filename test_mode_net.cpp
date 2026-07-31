@@ -525,16 +525,23 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.last_rx_us = get_current_time_us();
         note_fd_ep(w, src);
         // Mint a fresh cookie per session, so one captured from an earlier
-        // session cannot be replayed into this one. get_fake_random_number_nz()
-        // is the tunnel's own control-plane randomness (control_proto.cpp uses
-        // the 64-bit form for its nonce): mt19937 seeded from std::random_device
-        // and discarded 700000 steps. Its outputs are never observable to an
-        // off-path party here -- the cookie only travels to the pinned address
-        // -- so the attacker's only option is a 1-in-2^32 blind guess per
-        // attempt, and a wrong guess produces zero bytes of response to
-        // calibrate against. Non-zero so that "peer sent no cookie word"
-        // (which decodes as 0) can never match.
-        g_resp.cookie = get_fake_random_number_nz();
+        // session cannot be replayed into this one. It MUST come from the kernel
+        // CSPRNG (get_secure_random_number_nz), never from my_random/mt19937 and
+        // never derived from -k: the threat actor here holds -k and is on-path
+        // for its OWN address. This branch answers a mac-valid HELLO from any
+        // source, so that actor can request cookies from its own address at
+        // will. mt19937's tempering is invertible, so ~624 harvested cookies
+        // recover the generator state and reveal the next mint outright -- and
+        // that next mint is exactly what a dir=1 PHASE_BEGIN with a spoofed
+        // victim source must echo. The kernel CSPRNG has no such recoverable
+        // state, so the harvest yields nothing and the attacker is back to a
+        // 1-in-2^32 blind guess per attempt, with a wrong guess producing zero
+        // bytes of response to calibrate against. 32 bits is sufficient once
+        // unpredictable: a blind guess gets no ACK/error/timing feedback, so
+        // ~2^31 forged 48-byte PHASE_BEGINs (~103 GB) buy a single 614 MB burst
+        // -- amplification ~0.006, net-negative for the attacker. Non-zero so
+        // that "peer sent no cookie word" (which decodes as 0) can never match.
+        g_resp.cookie = get_secure_random_number_nz();
         mylog(log_info, "test: session from %s\n", src.get_str());
         char ack[TEST_HELLO_ACK_ACCEPT_LEN];
         int ack_len = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE, g_resp.cookie);
@@ -577,11 +584,15 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             // on responder_state_t::cookie). Only a peer that actually RECEIVED
             // our HELLO_ACK knows this value.
             //
-            // A mismatch is refused in silence -- no ACK, no timer, no state
-            // change, not even a keepalive refresh -- the same shape as the
-            // spread-refusal path below, which the prober already reads as
-            // "this direction was not measured". Answering would both leak a
-            // probe oracle and hand an attacker a (small) reflector.
+            // A mismatch is refused in silence -- no ACK, no timer, no g_rev
+            // write, no dead-man refresh -- the same shape as the spread-refusal
+            // path below, which the prober already reads as "this direction was
+            // not measured". (The shared pre-dispatch block above did already
+            // bump g_resp.last_rx_us and call note_fd_ep for this packet, as it
+            // does for every accepted non-HELLO message; that idle-timer touch
+            // is harmless here and none of the reverse-phase state is affected.)
+            // Answering would both leak a probe oracle and hand an attacker a
+            // (small) reflector.
             if (b.cookie == 0 || b.cookie != g_resp.cookie) {
                 mylog(log_warn, "test: refusing reverse phase %d from %s: bad or missing "
                                 "session cookie (spoofed source address, or a stale "

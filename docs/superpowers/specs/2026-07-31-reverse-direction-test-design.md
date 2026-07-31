@@ -223,14 +223,32 @@ PHASE_BEGIN(每 5s 一次)   -> 喂 dead-man 开关,维持发送
 
 | 步骤 | 行为 |
 |---|---|
-| responder 接受 `HELLO` | 用 `get_fake_random_number_nz()` 现取一个非零 32 位 cookie,存入会话状态 |
+| responder 接受 `HELLO` | 用 `get_secure_random_number_nz()`(内核 CSPRNG,`/dev/urandom`)现取一个非零 32 位 cookie,存入会话状态。**绝不能**用 `my_random`/mt19937,也不能由 `-k` 派生——理由见下 |
 | `HELLO_ACK` **仅 accept 路径** | 在 `caps` 之后追加该 cookie(reject 路径**不动**:旧 prober 把偏移 4 之后全部当文本打印) |
 | prober | 从 accept 中取出并保存,在**每个** `dir == 1` 的 `PHASE_BEGIN` 中回带 |
 | responder | `dir == 1` 且 cookie 不匹配(含缺失=0)→ **静默拒绝**:不回 ACK、不起定时器、不改任何状态,仅记 `log_warn`。这与"无可用数据端口"的拒绝形状一致,prober 侧读作"该方向未测出" |
 | 新的 `HELLO` | 重新铸一个 cookie,旧的立即失效,不可重放进后来的会话 |
 
-cookie 只会发往 `HELLO_ACK` 的目的地址,因此收不到该地址流量的伪造者永远学不到
-它;唯一手段是 2^32 盲猜,而猜错不产生任何回包可供校准。放大器由此关闭。
+**cookie 的熵源必须是内核 CSPRNG,不能是 mt19937。** 一个早期版本的推理是"该生成器
+的输出在这里对任何 off-path 方都不可观测",这句话是错的,也正是它放过了这个洞:
+responder 会应答**任何来源**地址发来的 mac-valid `HELLO`(只拒绝与已锁定 peer 不同来源
+的并发会话),所以持有 `-k` 的攻击者对**自己**的地址就是 on-path,可以不受限地从本地
+地址反复索取 cookie。若 cookie 取自 mt19937(seed 来自 `std::random_device`,种子本身没
+问题),其 tempering 可逆,约 624 个 HELLO 就能还原生成器的完整内部状态,从而**算出下
+一次铸造的 cookie**——而那正是伪造 `dir=1` `PHASE_BEGIN`(源地址填受害者)所要回带的值。
+在 `--test-mode` responder 里没有别的 `my_random` 消费者污染这条流(`--random-drop` 默认
+关闭,`test_encode` 用 `memset` 填充),所以攻击者的下标是精确的。改用 `/dev/urandom` 后
+生成器没有可还原的状态,同样的采集一无所获。
+
+改用 CSPRNG 后,cookie 只会发往 `HELLO_ACK` 的目的地址,收不到该地址流量的伪造者无从学到
+它;唯一手段是 2^32 盲猜,而猜错不产生任何回包(无 ACK、无报错、无时序信号)可供校准。
+
+**32 位在不可预测的前提下已足够,不必加宽到 64 位。** 盲猜得不到任何反馈,故约 2^31 个
+48 字节的伪造 `PHASE_BEGIN`(约 103 GB)才换来一次 614 MB 突发,放大比约 0.006,对攻击者
+净亏。宽度从来不是问题,可预测性才是;放大器由此关闭。
+
+失败处理:`/dev/urandom` 打不开或读不出时**致命退出**(`log_fatal` + `myexit`),绝不回退
+到 `my_random`——那正是本次要修的缺陷,静默降级等于没修。
 
 `dir == 0`(上行)**不做**该检查:上行的流量源是 prober 自己,不存在被放大的问
 题,加检查只会破坏兼容性。
