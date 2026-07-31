@@ -81,6 +81,25 @@ struct trace_t {
     void record(uint32_t seq, my_time_t now_us);
 };
 
+// Re-base the pacer rather than paying out the backlog when it has fallen this
+// far behind (load spike, vm pause). Releasing a backlog as a burst would
+// manufacture the time-correlated loss that the -i recommendation is measured
+// from -- the sender would be measuring its own scheduling, not the link.
+const my_time_t PACER_SLIP_US = 50000;
+
+// Token-bucket pacer, shared by the prober's blocking send loop and the
+// responder's ev_timer. Deliberately clock-free: `now_us` is injected so the
+// selftest can drive it with synthetic time.
+struct pacer_t {
+    double    pps = 0.0;
+    double    credit = 0.0;
+    my_time_t last_us = 0;
+
+    void init(double pps_, my_time_t now_us);
+    // How many packets to send right now. Advances internal state.
+    int  tick(my_time_t now_us);
+};
+
 struct trace_stats_t {
     uint32_t n;
     uint32_t arrived_n;

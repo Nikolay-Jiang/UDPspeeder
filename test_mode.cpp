@@ -74,6 +74,33 @@ int test_decode(char *buf, int len, test_hdr_t *hdr_out,
     return (int)hdr_out->msg_type;
 }
 
+// ---------------- pacer ----------------
+void pacer_t::init(double pps_, my_time_t now_us) {
+    pps = pps_;
+    credit = 0.0;
+    last_us = now_us;
+}
+
+int pacer_t::tick(my_time_t now_us) {
+    // my_time_t is unsigned; a backwards clock would underflow into a huge
+    // elapsed value and dump a burst.
+    if (now_us <= last_us) return 0;
+    my_time_t elapsed = now_us - last_us;
+    if (elapsed > PACER_SLIP_US) elapsed = PACER_SLIP_US;
+    last_us = now_us;
+
+    credit += (double)elapsed * pps / 1e6;
+    // Cap banked credit so a single tick cannot emit a long backlog. The cap is
+    // one tick's worth plus one, which is >= the legitimate per-tick budget at
+    // every supported rate (20000pps -> 21 >= 20), so it never throttles.
+    double cap = pps / 1000.0 + 1.0;
+    if (credit > cap) credit = cap;
+
+    int n = (int)credit;
+    credit -= (double)n;
+    return n;
+}
+
 // ---------------- loss trace + statistics ----------------
 void trace_t::init(uint32_t n, uint32_t pps_) {
     if (n > TEST_MAX_EXPECTED_N) {
@@ -583,6 +610,50 @@ int test_mode_selftest() {
         // over-capacity request must be refused
         TCHECK(test_encode(TEST_PROBE, 0, 0, pl, 4, buf, 32, 1200) == -1,
                "encode must refuse when out_cap too small");
+    }
+
+    // ---- pacer ----
+    {
+        // Exact rate: 200pps over 1000 x 1ms ticks must emit exactly 200.
+        pacer_t p;
+        p.init(200.0, 0);
+        int total = 0;
+        for (int k = 1; k <= 1000; k++) total += p.tick((my_time_t)k * 1000);
+        TCHECK(total == 200, "200pps over 1000 ticks must emit exactly 200, got %d", total);
+
+        // High rate must not be throttled by the burst cap: 20000pps at a 1ms
+        // tick legitimately owes 20 packets per tick.
+        pacer_t hp;
+        hp.init(20000.0, 0);
+        int hi = hp.tick(1000);
+        TCHECK(hi == 20, "20000pps at 1ms tick must emit 20, got %d", hi);
+
+        // Burst cap: a 200ms stall must NOT pay out the whole backlog. At
+        // 200pps that would be 40 packets in one go, manufacturing exactly the
+        // time-correlated loss the -i recommendation is derived from.
+        pacer_t b;
+        b.init(200.0, 0);
+        int burst = b.tick(200000);
+        TCHECK(burst == 1, "a 200ms stall at 200pps must emit 1, not a backlog, got %d", burst);
+
+        // ...and the stall must not leave banked credit behind that pays out on
+        // the next tick either.
+        int after = b.tick(201000);
+        TCHECK(after <= 1, "tick after a stall must not release a backlog, got %d", after);
+
+        // Low rate: 1pps must emit its first packet at t=1s, not before.
+        pacer_t lo;
+        lo.init(1.0, 0);
+        int early = 0;
+        for (int k = 1; k <= 999; k++) early += lo.tick((my_time_t)k * 1000);
+        TCHECK(early == 0, "1pps must emit nothing in the first 999ms, got %d", early);
+        int at_one_sec = lo.tick(1000000);
+        TCHECK(at_one_sec == 1, "1pps must emit exactly 1 at t=1s, got %d", at_one_sec);
+
+        // Non-monotonic clock must not produce negative or bogus budgets.
+        pacer_t nm;
+        nm.init(200.0, 1000000);
+        TCHECK(nm.tick(999000) == 0, "a backwards clock must emit 0");
     }
 
     // ---- trace + stats ----

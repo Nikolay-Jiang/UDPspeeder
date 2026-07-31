@@ -572,8 +572,8 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
           phase, pps, duration_sec, total, (int)dests.size());
 
     g_pr.phase_send_fail = 0;
-    double per_tick = (double)pps / 1000.0;
-    double acc = 0.0;
+    pacer_t pacer;
+    pacer.init((double)pps, get_current_time_us());
     uint32_t sent = 0;
     size_t rr = 0;
     my_time_t next_tick = get_current_time_us();
@@ -586,31 +586,23 @@ static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
         my_time_t now = get_current_time_us();
         if (next_tick > now) {
             usleep((useconds_t)(next_tick - now));
-        } else if (now - next_tick > 50000) {
-            // Fell >50ms behind (load spike, vm pause). Re-base rather than
-            // free-run: without this the loop stops sleeping and releases the
-            // whole backlog as a burst, manufacturing the time-correlated loss
-            // that the -i recommendation is measured from. Stretching the phase
-            // is harmless -- the responder waits for PHASE_END, not a clock --
-            // whereas dropping probes would be counted as loss.
+        } else if (now - next_tick > PACER_SLIP_US) {
+            // Stretching the phase is harmless -- the responder waits for
+            // PHASE_END, not a clock -- whereas dropping probes would be
+            // counted as loss.
             mylog(log_warn, "test: pacing slipped %llu ms behind, phase will run long\n",
                   (unsigned long long)((now - next_tick) / 1000));
             next_tick = now;
         }
 
-        acc += per_tick;
-        // Cap banked credit so one tick cannot emit a long backlog at once.
-        if (acc > per_tick + 1.0) acc = per_tick + 1.0;
-        while (acc >= 1.0 && sent < total) {
-            acc -= 1.0;
+        int budget = pacer.tick(get_current_time_us());
+        for (int b = 0; b < budget && sent < total; b++) {
             const address_t &d = dests[rr % dests.size()];
             rr++;
             prober_sendto(TEST_PROBE, phase, sent, NULL, 0, d, test_pkt_size);
             sent++;
             // Print once per threshold crossing, not once per tick -- at low
-            // pps many ticks elapse with sent unchanged, and a per-tick check
-            // here would reprint the same "sent/total" line on every one of
-            // them until the next packet finally goes out.
+            // pps many ticks elapse with sent unchanged.
             if (sent >= next_progress) {
                 mylog(log_info, "test: phase %d progress %u/%u\n", phase, sent, total);
                 next_progress += progress_step;
