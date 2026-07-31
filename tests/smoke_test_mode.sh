@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke_test_mode.sh — end-to-end check for --test-mode
 #
-# Round 1: --test-selftest (pure-function regression, expects 95 checks/0 fail)
+# Round 1: --test-selftest (pure-function regression, expects 0 failures)
 # Round 2: loopback probe with no injected loss   -> reported loss < 1%
 # Round 3: loopback probe with --random-drop 1000 (~10% injected) -> reported
 #          loss lands in a 5-16% band (injection is pseudo-random per run, so
@@ -16,12 +16,19 @@
 #          (S4) phase across all 4 data ports (each fd answers the address it
 #          itself observed during S3, per Task 6's nat design), and the report
 #          renders a downstream port-range comparison line.
+# Round 7: --random-drop 1000 on the RESPONDER only (~10% injected downstream,
+#          nothing injected upstream) -> upstream loss stays <1% while the
+#          downstream figure lands in the same 5-16% band Round 3 asserts for
+#          the upstream direction. This is the only round that proves the
+#          downstream measurement tracks real loss rather than merely being
+#          non-zero: rounds 4 and 6 only ever see a clean loopback, against
+#          which a systematically-understating downstream path would still
+#          look perfect.
 #
 # Timing note: the rate-scan phase is a fixed 10s x 3 sub-phases regardless of
 # --test-duration/--test-pps, so each prober run still pays ~36s minimum in
 # addition to its S1/S2 (and, for round 6, S3/S4) phases. The whole script
-# (selftest + 5 full prober runs, one per Round 2-6) takes roughly 2.5
-# minutes.
+# (selftest + 6 full prober runs, one per Round 2-7) takes roughly 3 minutes.
 #
 # Usage: bash tests/smoke_test_mode.sh [/path/to/speederv2]
 # Exit 0 on pass, non-zero on failure.
@@ -267,6 +274,47 @@ if ! grep -q "reverse phase 4 will use 4 data port(s)" "$WORKDIR/r6_resp.log"; t
     exit 1
 fi
 echo "  [reverse-spread] ok"
+echo
+
+echo "Round 7: --random-drop 1000 on the RESPONDER (~10% injected downstream only)"
+# --random-drop on the responder is implemented only for TEST_PROBE in the
+# reverse sender (rev_tick_cb), so it injects loss into the server -> client
+# direction and leaves client -> server untouched. That asymmetry is the point:
+# it separates "the downstream number moves with real loss" from "the
+# downstream number is just a copy of the upstream one".
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" --random-drop 1000 \
+    --log-level 4 --disable-color > "$WORKDIR/r7_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+timeout 120 "$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --test-duration 2 --test-pps 100 --disable-color \
+    > "$WORKDIR/r7_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "server -> client, 单端口" "$WORKDIR/r7_prober.log"; then
+    echo "  FAIL: no server -> client section in the report"
+    sed -n '1,120p' "$WORKDIR/r7_prober.log"
+    exit 1
+fi
+
+# Upstream: the prober injects nothing, so this must stay clean. If it does not,
+# the downstream figure below cannot be attributed to the injected loss.
+UP_LOSS7=$(extract_loss < "$WORKDIR/r7_prober.log")
+assert_is_number "$UP_LOSS7" "round-7 upstream"
+echo "  [down-drop] upstream loss = ${UP_LOSS7}%"
+awk -v l="$UP_LOSS7" 'BEGIN{ exit !(l < 1.0) }' \
+    || { echo "  FAIL: upstream reported ${UP_LOSS7}% but nothing was injected upstream"; exit 1; }
+
+# Downstream: same band as Round 3, for the same reason (pseudo-random
+# injection varies run to run). Anchored on the same section range Round 4 uses.
+DOWN_LOSS7=$(sed -n '/server -> client, 单端口/,/推荐配置/p' "$WORKDIR/r7_prober.log" \
+    | grep "丢包率" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+assert_is_number "$DOWN_LOSS7" "round-7 downstream"
+echo "  [down-drop] downstream loss = ${DOWN_LOSS7}%"
+awk -v l="$DOWN_LOSS7" 'BEGIN{ exit !(l > 5.0 && l < 16.0) }' \
+    || { echo "  FAIL: injected ~10% downstream but reported ${DOWN_LOSS7}% (expected band 5-16%)"; exit 1; }
+echo "  [down-drop] ok"
 echo
 
 echo "=== PASSED ==="
