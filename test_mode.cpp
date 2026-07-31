@@ -101,6 +101,16 @@ int pacer_t::tick(my_time_t now_us) {
     return n;
 }
 
+bool test_addr_same_ip(address_t a, address_t b) {
+    if (!a.is_vaild() || !b.is_vaild()) return false;
+    if (a.get_type() != b.get_type()) return false;
+    if (a.get_type() == AF_INET)
+        return memcmp(&a.inner.ipv4.sin_addr, &b.inner.ipv4.sin_addr,
+                      sizeof(a.inner.ipv4.sin_addr)) == 0;
+    return memcmp(&a.inner.ipv6.sin6_addr, &b.inner.ipv6.sin6_addr,
+                  sizeof(a.inner.ipv6.sin6_addr)) == 0;
+}
+
 // ---------------- loss trace + statistics ----------------
 void trace_t::init(uint32_t n, uint32_t pps_) {
     if (n > TEST_MAX_EXPECTED_N) {
@@ -654,6 +664,25 @@ int test_mode_selftest() {
         pacer_t nm;
         nm.init(200.0, 1000000);
         TCHECK(nm.tick(999000) == 0, "a backwards clock must emit 0");
+    }
+
+    // ---- address comparison ----
+    {
+        char s1[] = "127.0.0.1:1000";
+        char s2[] = "127.0.0.1:2000";
+        char s3[] = "127.0.0.2:1000";
+        address_t a, b, c;
+        a.from_str(s1);
+        b.from_str(s2);
+        c.from_str(s3);
+
+        // Documents the root cause: operator== includes the port, which is why
+        // a symmetric nat's per-destination source ports split one peer.
+        TCHECK(!(a == b), "operator== must treat differing ports as different addresses");
+        TCHECK(test_addr_same_ip(a, b),
+               "same ip with different ports must compare equal by ip");
+        TCHECK(!test_addr_same_ip(a, c), "different ips must not compare equal by ip");
+        TCHECK(test_addr_same_ip(a, a), "an address must compare equal to itself");
     }
 
     // ---- trace + stats ----

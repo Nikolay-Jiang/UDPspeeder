@@ -136,6 +136,18 @@ struct responder_state_t {
 static responder_state_t g_resp;
 static std::vector<int> g_resp_fds;
 
+// The source address most recently seen on each responder fd, parallel to
+// g_resp_fds (index 0 = control fd, 1..N = data fds). Task 6's reverse
+// multi-port phase must send from fd k back to the address that fd actually
+// saw: under a symmetric nat that is a different external port per fd, and
+// replying to the control-plane address instead would be silently dropped.
+// Refreshed on every accepted packet -- a nat can rebind mid-run.
+struct data_ep_t {
+    bool      seen = false;
+    address_t addr;
+};
+static std::vector<data_ep_t> g_data_eps;
+
 // ---------------- HELLO / HELLO_ACK payloads ----------------
 //
 // HELLO carries the prober's --data-port-range as {count, first, last}, three
@@ -255,16 +267,42 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
     // Every session must start with HELLO. Without this, a peer holding the key
     // could drive PHASE_BEGIN/PROBE/REQUEST_RESULT with no handshake and no
     // pinning, letting two such peers clobber each other's in-flight trace.
-    // Design doc section 9.3 requires source pinning and a single active session.
-    if (mt != TEST_HELLO && (!g_resp.active || !(src == g_resp.peer))) {
-        mylog(log_debug, "test: ignoring msg_type %d from %s (no active session, or not the pinned peer)\n",
-              mt, src.get_str());
-        return;
+    //
+    // Probes are matched by ip only. A symmetric nat gives the peer a different
+    // external source port per destination port, so a data-port probe arrives
+    // from an address that is not byte-equal to the control-plane peer -- and
+    // dropping those made S3 report ~100% loss and conclude that port-range is
+    // useless, on precisely the links it helps most. Control messages keep the
+    // exact (ip,port) match: they only ever travel on the single control
+    // mapping, so tightening them costs nothing.
+    if (mt != TEST_HELLO) {
+        bool ok = g_resp.active &&
+                  (mt == TEST_PROBE ? test_addr_same_ip(src, g_resp.peer)
+                                    : src == g_resp.peer);
+        if (!ok) {
+            mylog(log_debug, "test: ignoring msg_type %d from %s (no active session, "
+                             "or not the pinned peer)\n", mt, src.get_str());
+            return;
+        }
     }
 
     // Past the gate, a non-HELLO message is by definition from the pinned peer
     // of an active session: it is proof of life, so it holds off idle expiry.
-    if (mt != TEST_HELLO) g_resp.last_rx_us = get_current_time_us();
+    if (mt != TEST_HELLO) {
+        g_resp.last_rx_us = get_current_time_us();
+
+        // Refresh this fd's view of the peer. Only from an accepted (mac-valid,
+        // pinned) packet, so an off-path sender cannot redirect the reverse
+        // phase. HELLO is refreshed separately below, only once it is actually
+        // accepted -- doing it here unconditionally would let a mac-valid HELLO
+        // from a non-pinned sender (e.g. aimed at a data fd, or one that fails
+        // hello_pl_check) overwrite the table before its own rejection checks run.
+        size_t fd_idx = (size_t)(intptr_t)w->data;
+        if (fd_idx < g_data_eps.size()) {
+            g_data_eps[fd_idx].seen = true;
+            g_data_eps[fd_idx].addr = src;
+        }
+    }
 
     if (mt == TEST_HELLO) {
         if (g_resp.active && !(src == g_resp.peer)) {
@@ -289,6 +327,13 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.peer = src;
         g_resp.phase_open = false;
         g_resp.last_rx_us = get_current_time_us();
+        {
+            size_t fd_idx = (size_t)(intptr_t)w->data;
+            if (fd_idx < g_data_eps.size()) {
+                g_data_eps[fd_idx].seen = true;
+                g_data_eps[fd_idx].addr = src;
+            }
+        }
         mylog(log_info, "test: session from %s\n", src.get_str());
         char ack[4];
         write_u32(ack, (u32_t)TEST_REJECT_NONE);
@@ -351,6 +396,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         mylog(log_info, "test: session closed by %s\n", src.get_str());
         g_resp.active = false;
         g_resp.phase_open = false;
+        for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
     }
 }
 
@@ -370,6 +416,7 @@ static void responder_timer_cb(struct ev_loop *loop, struct ev_timer *w, int rev
                   g_resp.peer.get_str(), (unsigned long long)(silent_us / 1000000ULL));
             g_resp.active = false;
             g_resp.phase_open = false;
+            for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
             return;
         }
     }
@@ -412,10 +459,12 @@ int test_mode_responder_loop() {
         g_resp_fds.push_back(fd);
         ev_io *w = new ev_io;
         ev_io_init(w, responder_cb, fd, EV_READ);
+        w->data = (void *)(intptr_t)k;   // index into g_resp_fds / g_data_eps
         ev_io_start(loop, w);
         watchers.push_back(w);
         mylog(log_info, "test: responder listening at %s\n", binds[k].get_str());
     }
+    g_data_eps.assign(g_resp_fds.size(), data_ep_t());
 
     ev_timer t;
     ev_init(&t, responder_timer_cb);

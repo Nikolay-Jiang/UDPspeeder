@@ -100,6 +100,12 @@ struct pacer_t {
     int  tick(my_time_t now_us);
 };
 
+// Compares the ip only, ignoring the port. Needed because a symmetric nat
+// assigns a different external source port per destination port, so probes to
+// the data ports arrive from an address that address_t::operator== (a memcmp
+// over the whole sockaddr, common.h:301) reports as a different peer.
+bool test_addr_same_ip(address_t a, address_t b);
+
 struct trace_stats_t {
     uint32_t n;
     uint32_t arrived_n;
