@@ -185,8 +185,18 @@ inbound port.
 - **Responder** (far end, just answers probes): `-s --test-mode -l <ip:port>`
 - **Prober** (drives the measurement, prints the report): `-c --test-mode -r <ip:port>`
 - `-k` is **mandatory** on both sides: probes are MAC-authenticated, so an
-  open responder cannot be driven by an unauthenticated party (e.g. used as a
-  UDP reflector).
+  open responder cannot be driven by an unauthenticated party.
+- The server → client phases are additionally gated on a **per-session cookie**
+  that the responder mints at random and returns only in its handshake reply.
+  The prober must echo it in every reverse-phase request. MAC authentication
+  alone was not enough there: `-k` is shared with every tunnel client on the
+  server, and the reverse phase is the one path on which the responder becomes
+  a traffic *source*, so without the cookie anyone holding the key could forge
+  a handshake with a victim's source address and turn the responder into a UDP
+  amplifier aimed at that victim. The cookie only ever travels back to the
+  address the handshake reply was sent to, so a party that cannot receive that
+  address's traffic never learns it, and a request without it is dropped in
+  silence.
 
 #### How to run it
 

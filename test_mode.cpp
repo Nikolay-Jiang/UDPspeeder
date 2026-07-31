@@ -111,34 +111,45 @@ bool test_addr_same_ip(address_t a, address_t b) {
                   sizeof(a.inner.ipv6.sin6_addr)) == 0;
 }
 
-void test_phase_begin_pack(char *out, uint32_t expected_n, uint32_t pps,
-                           uint32_t dir, uint32_t spread) {
-    write_u32(out + 0,  expected_n);
-    write_u32(out + 4,  pps);
-    write_u32(out + 8,  dir);
-    write_u32(out + 12, spread);
+int test_phase_begin_pack(char *out, const test_phase_begin_t &b) {
+    write_u32(out + 0,  b.expected_n);
+    write_u32(out + 4,  b.pps);
+    write_u32(out + 8,  b.dir);
+    write_u32(out + 12, b.spread);
+    write_u32(out + 16, b.cookie);
+    return TEST_PHASE_BEGIN_PL_LEN;
 }
 
-int test_phase_begin_unpack(const uint8_t *pl, int pl_len, uint32_t *expected_n,
-                            uint32_t *pps, uint32_t *dir, uint32_t *spread) {
+int test_phase_begin_unpack(const uint8_t *pl, int pl_len, test_phase_begin_t *out) {
     if (pl_len < 12) return -1;
     char *p = (char *)pl;   // read_u32 takes char*, but never writes
-    *expected_n = read_u32(p + 0);
-    *pps        = read_u32(p + 4);
-    *dir        = read_u32(p + 8);
-    *spread     = (pl_len >= TEST_PHASE_BEGIN_PL_LEN) ? read_u32(p + 12) : 0u;
+    *out = test_phase_begin_t();
+    out->expected_n = read_u32(p + 0);
+    out->pps        = read_u32(p + 4);
+    out->dir        = read_u32(p + 8);
+    // Each optional word is gated on its own end offset, so a payload that
+    // stops anywhere past the mandatory 12 bytes decodes what it does carry and
+    // leaves the rest at 0 -- never reading past the datagram.
+    if (pl_len >= 16) out->spread = read_u32(p + 12);
+    if (pl_len >= 20) out->cookie = read_u32(p + 16);
     return 0;
 }
 
-int test_hello_ack_accept_pack(char *out, u32_t caps) {
+int test_hello_ack_accept_pack(char *out, u32_t caps, u32_t cookie) {
     write_u32(out + 0, 0u);   // TEST_REJECT_NONE
     write_u32(out + 4, caps);
-    return 8;
+    write_u32(out + 8, cookie);
+    return TEST_HELLO_ACK_ACCEPT_LEN;
 }
 
 u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len) {
     if (pl_len < 8) return 0u;   // old responder: accept was 4 bytes
     return read_u32((char *)pl + 4);
+}
+
+u32_t test_hello_ack_cookie(const uint8_t *pl, int pl_len) {
+    if (pl_len < TEST_HELLO_ACK_ACCEPT_LEN) return 0u;
+    return read_u32((char *)pl + 8);
 }
 
 // ---------------- loss trace + statistics ----------------
@@ -762,35 +773,59 @@ int test_mode_selftest() {
     // ---- phase_begin / hello_ack payload codecs ----
     {
         char pl[TEST_PHASE_BEGIN_PL_LEN];
-        test_phase_begin_pack(pl, 1234, 200, 1, 1);
-        uint32_t n = 0, pps = 0, dir = 0, spread = 0;
-        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, sizeof(pl),
-                                       &n, &pps, &dir, &spread) == 0,
-               "16-byte phase_begin payload must unpack");
-        TCHECK(n == 1234 && pps == 200 && dir == 1 && spread == 1,
-               "phase_begin fields must round-trip: got n=%u pps=%u dir=%u spread=%u",
-               n, pps, dir, spread);
+        test_phase_begin_t src;
+        src.expected_n = 1234;
+        src.pps        = 200;
+        src.dir        = 1;
+        src.spread     = 1;
+        src.cookie     = 0xdeadbeefu;
+        TCHECK(test_phase_begin_pack(pl, src) == TEST_PHASE_BEGIN_PL_LEN,
+               "phase_begin pack must write %d bytes", TEST_PHASE_BEGIN_PL_LEN);
 
-        // An old peer sends 12 bytes with no spread word. It must decode, and
-        // spread must default to 0 rather than reading past the payload.
-        uint32_t n2 = 0, pps2 = 0, dir2 = 0, spread2 = 7;
-        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 12,
-                                       &n2, &pps2, &dir2, &spread2) == 0,
+        test_phase_begin_t got;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, sizeof(pl), &got) == 0,
+               "%d-byte phase_begin payload must unpack", TEST_PHASE_BEGIN_PL_LEN);
+        TCHECK(got.expected_n == 1234 && got.pps == 200 && got.dir == 1 &&
+                   got.spread == 1 && got.cookie == 0xdeadbeefu,
+               "phase_begin fields must round-trip: got n=%u pps=%u dir=%u spread=%u "
+               "cookie=%u",
+               got.expected_n, got.pps, got.dir, got.spread, got.cookie);
+
+        // Truncated payloads: each optional word must default to 0 rather than
+        // being read out of a datagram that never carried it. A cookie read out
+        // of bounds could accidentally match and reopen the amplifier.
+        test_phase_begin_t g12;
+        g12.spread = g12.cookie = 7;   // must be overwritten
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 12, &g12) == 0,
                "12-byte legacy phase_begin payload must still unpack");
-        TCHECK(spread2 == 0, "legacy payload must default spread to 0, got %u", spread2);
+        TCHECK(g12.expected_n == 1234 && g12.pps == 200 && g12.dir == 1,
+               "12-byte payload must still decode the three mandatory words");
+        TCHECK(g12.spread == 0 && g12.cookie == 0,
+               "12-byte payload must default spread/cookie to 0, got %u/%u",
+               g12.spread, g12.cookie);
 
-        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 11,
-                                       &n2, &pps2, &dir2, &spread2) == -1,
+        test_phase_begin_t g16;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 16, &g16) == 0,
+               "16-byte phase_begin payload must unpack");
+        TCHECK(g16.spread == 1 && g16.cookie == 0,
+               "16-byte payload must decode spread but default the cookie to 0, "
+               "got spread=%u cookie=%u", g16.spread, g16.cookie);
+
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 11, &got) == -1,
                "a payload shorter than 12 bytes must be rejected");
 
-        // HELLO_ACK: accept path carries caps; the reject path is unchanged, so
-        // an old prober reading a reason string from offset 4 is unaffected.
+        // HELLO_ACK: accept path carries caps and the session cookie; the reject
+        // path is unchanged, so an old prober reading a reason string from
+        // offset 4 is unaffected.
         char ack[16];
-        int alen = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE);
-        TCHECK(alen == 8, "accept ack must be 8 bytes, got %d", alen);
+        int alen = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE, 0x01020304u);
+        TCHECK(alen == TEST_HELLO_ACK_ACCEPT_LEN, "accept ack must be %d bytes, got %d",
+               TEST_HELLO_ACK_ACCEPT_LEN, alen);
         TCHECK(read_u32(ack) == 0, "accept ack must carry reject code 0");
         TCHECK(test_hello_ack_caps((const uint8_t *)ack, alen) == TEST_CAP_REVERSE,
                "caps word must round-trip");
+        TCHECK(test_hello_ack_cookie((const uint8_t *)ack, alen) == 0x01020304u,
+               "session cookie must round-trip");
 
         // An old responder's 4-byte accept must read as "no capabilities"
         // rather than as garbage -- this is the guard that stops a new prober
@@ -799,6 +834,16 @@ int test_mode_selftest() {
         write_u32(old_ack, 0);
         TCHECK(test_hello_ack_caps((const uint8_t *)old_ack, 4) == 0,
                "a 4-byte legacy accept must report no capabilities");
+        TCHECK(test_hello_ack_cookie((const uint8_t *)old_ack, 4) == 0,
+               "a 4-byte legacy accept must report no cookie");
+        // An 8-byte accept (caps but no cookie) must not read a cookie out of
+        // the bytes after it: 0 is the only safe answer, and 0 is never a valid
+        // cookie, so it can never be echoed back into a passing check.
+        char ack8[8];
+        write_u32(ack8 + 0, 0);
+        write_u32(ack8 + 4, TEST_CAP_REVERSE);
+        TCHECK(test_hello_ack_cookie((const uint8_t *)ack8, 8) == 0,
+               "an 8-byte accept must report no cookie");
     }
 
     // ---- trace + stats ----

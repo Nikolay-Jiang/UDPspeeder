@@ -87,7 +87,10 @@ static void print_help() {
     printf("test mode options (measure the link and recommend fec parameters):\n");
     printf("    --test-mode                           run a one-shot link measurement instead of a tunnel, then exit.\n");
     printf("                                          must be set on both sides. -k is mandatory: probes are mac-authenticated,\n");
-    printf("                                          so an open responder cant be driven by an unauthenticated peer.\n");
+    printf("                                          so an open responder cant be driven by an unauthenticated peer. the\n");
+    printf("                                          server -> client phases additionally need a per-session cookie handed\n");
+    printf("                                          out in the handshake, so a spoofed source address cant aim them at a\n");
+    printf("                                          third party even with the key.\n");
     printf("                                          responder: -s --test-mode -l <ip:port>\n");
     printf("                                          prober:    -c --test-mode -r <ip:port>  (prints the report)\n");
     printf("    --test-duration       <sec>           per-phase probe duration, default: 30, max: 600.\n");

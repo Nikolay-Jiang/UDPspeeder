@@ -132,6 +132,22 @@ struct responder_state_t {
     uint32_t           cur_pps = 0;
     my_time_t          last_mac_warn_ms = 0;
 
+    // Per-session return-routability token. Minted fresh when a HELLO is
+    // accepted, returned ONLY on the HELLO_ACK accept path -- i.e. only ever to
+    // the address the HELLO claimed to come from -- and required back in every
+    // dir=1 PHASE_BEGIN.
+    //
+    // Without it the reverse phase was a spoofable UDP amplifier: source
+    // pinning locks the destination to the HELLO's source address, but that
+    // address is exactly what an off-path attacker forges. ~316 bytes of
+    // spoofed HELLO + PHASE_BEGIN + one keepalive per 5s bought ~614 MB at
+    // ~196 Mbps aimed at a victim who never asked for it, and -k is shared with
+    // every tunnel client on the server, so any legitimate user could do it.
+    // The cookie only ever travels back to the pinned address, so a forger who
+    // cannot receive that address's traffic never learns it. 0 is never minted,
+    // so a peer that sends no cookie word can never match by accident.
+    u32_t              cookie = 0;
+
     // Most recent reverse phase this session already tore down (finished or
     // aborted), so a late keepalive for that same phase number cannot restart
     // it from scratch -- see the guard in the TEST_PHASE_BEGIN dir!=0 branch.
@@ -503,9 +519,20 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.last_rev_phase_done = -1;
         g_resp.last_rx_us = get_current_time_us();
         note_fd_ep(w, src);
+        // Mint a fresh cookie per session, so one captured from an earlier
+        // session cannot be replayed into this one. get_fake_random_number_nz()
+        // is the tunnel's own control-plane randomness (control_proto.cpp uses
+        // the 64-bit form for its nonce): mt19937 seeded from std::random_device
+        // and discarded 700000 steps. Its outputs are never observable to an
+        // off-path party here -- the cookie only travels to the pinned address
+        // -- so the attacker's only option is a 1-in-2^32 blind guess per
+        // attempt, and a wrong guess produces zero bytes of response to
+        // calibrate against. Non-zero so that "peer sent no cookie word"
+        // (which decodes as 0) can never match.
+        g_resp.cookie = get_fake_random_number_nz();
         mylog(log_info, "test: session from %s\n", src.get_str());
-        char ack[8];
-        int ack_len = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE);
+        char ack[TEST_HELLO_ACK_ACCEPT_LEN];
+        int ack_len = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE, g_resp.cookie);
         responder_send(w->fd, src, TEST_HELLO_ACK, 0, ack, ack_len);
         g_hello_ack_sent_us = get_current_time_us();
         // A new session's grace-period sizing must not reuse a stale RTT from
@@ -514,9 +541,10 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_pr_rtt_hint_us = 0;
 
     } else if (mt == TEST_PHASE_BEGIN) {
-        uint32_t expected_n = 0, pps = 0, dir = 0, spread = 0;
-        if (test_phase_begin_unpack(pl, pl_len, &expected_n, &pps, &dir, &spread) != 0)
+        test_phase_begin_t b;
+        if (test_phase_begin_unpack(pl, pl_len, &b) != 0)
             return;
+        uint32_t expected_n = b.expected_n, pps = b.pps, dir = b.dir, spread = b.spread;
 
         // A duplicate or delayed PHASE_BEGIN for the phase already running must
         // NOT re-init the trace: that discards every probe recorded so far and
@@ -537,6 +565,25 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             return;
         }
         if (dir != 0) {
+            // RETURN-ROUTABILITY GATE. This must come before every other
+            // dir!=0 branch, including the keepalive re-ACK: a reverse phase is
+            // the only path on which this program becomes a traffic source, and
+            // the source address it aims at is attacker-supplied (see the note
+            // on responder_state_t::cookie). Only a peer that actually RECEIVED
+            // our HELLO_ACK knows this value.
+            //
+            // A mismatch is refused in silence -- no ACK, no timer, no state
+            // change, not even a keepalive refresh -- the same shape as the
+            // spread-refusal path below, which the prober already reads as
+            // "this direction was not measured". Answering would both leak a
+            // probe oracle and hand an attacker a (small) reflector.
+            if (b.cookie == 0 || b.cookie != g_resp.cookie) {
+                mylog(log_warn, "test: refusing reverse phase %d from %s: bad or missing "
+                                "session cookie (spoofed source address, or a stale "
+                                "session's token replayed)\n",
+                      (int)h.phase, src.get_str());
+                return;
+            }
             // A duplicate PHASE_BEGIN is the prober's keepalive during a
             // reverse phase (it is otherwise silent). Re-ACK and return
             // WITHOUT touching the pacer or the counters: restarting them
@@ -662,6 +709,7 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.phase_open = false;
         if (g_rev.active) rev_stop(loop);
         g_resp.last_rev_phase_done = -1;
+        g_resp.cookie = 0;   // 0 never matches, so the token dies with the session
         for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
     }
 }
@@ -684,6 +732,7 @@ static void responder_timer_cb(struct ev_loop *loop, struct ev_timer *w, int rev
             g_resp.phase_open = false;
             if (g_rev.active) rev_stop(loop);
             g_resp.last_rev_phase_done = -1;
+            g_resp.cookie = 0;
             for (size_t k = 0; k < g_data_eps.size(); k++) g_data_eps[k] = data_ep_t();
             return;
         }
@@ -767,6 +816,11 @@ struct prober_ctx_t {
     uint32_t      run_send_fail = 0;
     uint32_t      run_send_total = 0;
     u32_t         peer_caps = 0;
+    // Return-routability token handed to us on the HELLO_ACK accept, echoed in
+    // every dir=1 PHASE_BEGIN. 0 means the responder sent none (an older build);
+    // we still send that 0, which such a build ignores and a current one
+    // refuses -- either way we never fabricate a token.
+    u32_t         session_cookie = 0;
 };
 
 static prober_ctx_t g_pr;
@@ -875,8 +929,16 @@ static bool prober_exchange(int msg_type, int phase, const void *payload, int pa
 static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
                               const std::vector<address_t> &dests) {
     uint32_t total = pps * (uint32_t)duration_sec;
+    test_phase_begin_t b;
+    b.expected_n = total;
+    b.pps        = pps;
+    b.dir        = 0;
+    b.spread     = dests.size() > 1 ? 1 : 0;
+    // No cookie on an upstream phase: we are the traffic source there, so there
+    // is nothing for a return-routability check to protect, and requiring one
+    // would break compatibility with responders that never mint one.
     char begin_pl[TEST_PHASE_BEGIN_PL_LEN];
-    test_phase_begin_pack(begin_pl, total, pps, 0, dests.size() > 1 ? 1 : 0);
+    test_phase_begin_pack(begin_pl, b);
 
     if (!prober_exchange(TEST_PHASE_BEGIN, phase, begin_pl, sizeof(begin_pl),
                           TEST_PHASE_ACK, 1000, 5, NULL, NULL)) {
@@ -987,13 +1049,22 @@ static bool prober_run_reverse_phase(int phase, uint32_t pps, int duration_sec,
                                       bool spread, trace_t *trace_out,
                                       uint32_t *peer_send_fail_out) {
     uint32_t total = pps * (uint32_t)duration_sec;
+    test_phase_begin_t b;
+    b.expected_n = total;
+    b.pps        = pps;
+    b.dir        = 1;
+    b.spread     = spread ? 1 : 0;
+    // Proof to the responder that we are really at the address it pinned. It
+    // refuses -- silently -- any dir=1 phase whose cookie does not match, which
+    // is what stops it being used as a spoofed-source amplifier.
+    b.cookie     = g_pr.session_cookie;
     char begin_pl[TEST_PHASE_BEGIN_PL_LEN];
-    test_phase_begin_pack(begin_pl, total, pps, 1, spread ? 1 : 0);
+    test_phase_begin_pack(begin_pl, b);
 
     // Unlike an upstream phase, a missing ACK here is NOT fatal: the responder
-    // deliberately withholds it when it cannot run the phase (Task 6 refuses a
-    // spread phase when no data port has seen this peer). Treat it as "this
-    // direction was not measured" and let the caller say so, rather than
+    // deliberately withholds it when it will not run the phase (no data port
+    // has seen this peer, or the session cookie did not match). Treat it as
+    // "this direction was not measured" and let the caller say so, rather than
     // killing a run that has already produced good upstream data.
     if (!prober_exchange(TEST_PHASE_BEGIN, phase, begin_pl, sizeof(begin_pl),
                           TEST_PHASE_ACK, 1000, 5, NULL, NULL)) {
@@ -1143,9 +1214,18 @@ int test_mode_prober_loop() {
                          "      reason: %s\n", reason);
         myexit(-1);
     }
-    g_pr.peer_caps = test_hello_ack_caps(ack_pl, ack_len);
+    g_pr.peer_caps      = test_hello_ack_caps(ack_pl, ack_len);
+    g_pr.session_cookie = test_hello_ack_cookie(ack_pl, ack_len);
     mylog(log_info, "test: responder reachable, RTT %.0f ms, caps 0x%x\n",
           g_pr.rtt_us / 1000.0, (unsigned)g_pr.peer_caps);
+    if ((g_pr.peer_caps & TEST_CAP_REVERSE) && g_pr.session_cookie == 0) {
+        // Only possible against an intermediate build that advertises reverse
+        // support but mints no cookie. Say so rather than letting the reverse
+        // phase fail as an unexplained "not measured".
+        mylog(log_warn, "test: responder advertises reverse support but sent no session "
+                        "cookie -- it is an older build; the server -> client "
+                        "measurement may be refused\n");
+    }
 
     std::vector<address_t> single;
     single.push_back(remote_addr);

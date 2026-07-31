@@ -110,24 +110,44 @@ bool test_addr_same_ip(address_t a, address_t b);
 // Capability bits advertised by the responder in HELLO_ACK's accept path.
 const u32_t TEST_CAP_REVERSE = 1u << 0;   // supports dir=1 (server -> client) phases
 
-// PHASE_BEGIN payload: expected_n, pps, dir, spread -- four big-endian u32s.
-// An old responder validates `pl_len < 12`, so appending the fourth word is
-// backward compatible in both directions.
-const int TEST_PHASE_BEGIN_PL_LEN = 16;
+// PHASE_BEGIN payload: five big-endian u32s. Only the first three are mandatory
+// -- an old responder validates `pl_len < 12` and reads exactly those -- so
+// every later word is append-only and backward compatible in both directions.
+//
+//   expected_n, pps, dir : the original three
+//   spread               : run this phase across the data ports
+//   cookie               : the responder's per-session return-routability
+//                          token, echoed from HELLO_ACK. Mandatory for dir=1,
+//                          ignored for dir=0 (see the note on responder_state_t
+//                          ::cookie in test_mode_net.cpp).
+const int TEST_PHASE_BEGIN_PL_LEN = 20;
 
-void test_phase_begin_pack(char *out, uint32_t expected_n, uint32_t pps,
-                           uint32_t dir, uint32_t spread);
-// 0 on success, -1 if shorter than 12 bytes. `spread` is set to 0 for a
-// 12-byte (legacy) payload.
-int  test_phase_begin_unpack(const uint8_t *pl, int pl_len, uint32_t *expected_n,
-                             uint32_t *pps, uint32_t *dir, uint32_t *spread);
+struct test_phase_begin_t {
+    uint32_t expected_n = 0;
+    uint32_t pps        = 0;
+    uint32_t dir        = 0;
+    uint32_t spread     = 0;
+    uint32_t cookie     = 0;
+};
 
-// HELLO_ACK accept path: reject code 0 followed by a capability word. The
-// reject path keeps the old layout (code + reason string) precisely because an
-// old prober prints everything from offset 4 as text -- putting caps there
-// would surface as garbage in an operator-facing error message.
-int   test_hello_ack_accept_pack(char *out, u32_t caps);
+// Returns the number of bytes written (TEST_PHASE_BEGIN_PL_LEN).
+int test_phase_begin_pack(char *out, const test_phase_begin_t &b);
+// 0 on success, -1 if shorter than 12 bytes. Every field past the mandatory
+// first three defaults to 0 when the payload stops short of it, so a legacy
+// (12- or 16-byte) sender decodes without reading past its own payload.
+int test_phase_begin_unpack(const uint8_t *pl, int pl_len, test_phase_begin_t *out);
+
+// HELLO_ACK accept path: reject code 0, a capability word, then a per-session
+// random cookie. The reject path keeps the old layout (code + reason string)
+// precisely because an old prober prints everything from offset 4 as text --
+// putting caps or a cookie there would surface as garbage in an operator-facing
+// error message, so nothing is ever appended to the reject path.
+const int TEST_HELLO_ACK_ACCEPT_LEN = 12;
+int   test_hello_ack_accept_pack(char *out, u32_t caps, u32_t cookie);
 u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len);
+// 0 when the peer sent no cookie (an accept from an older build). 0 is never a
+// valid cookie, so it cannot be replayed as one.
+u32_t test_hello_ack_cookie(const uint8_t *pl, int pl_len);
 
 struct trace_stats_t {
     uint32_t n;
