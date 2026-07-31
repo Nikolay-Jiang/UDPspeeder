@@ -106,6 +106,28 @@ struct pacer_t {
 // over the whole sockaddr, common.h:301) reports as a different peer.
 bool test_addr_same_ip(address_t a, address_t b);
 
+// Capability bits advertised by the responder in HELLO_ACK's accept path.
+const u32_t TEST_CAP_REVERSE = 1u << 0;   // supports dir=1 (server -> client) phases
+
+// PHASE_BEGIN payload: expected_n, pps, dir, spread -- four big-endian u32s.
+// An old responder validates `pl_len < 12`, so appending the fourth word is
+// backward compatible in both directions.
+const int TEST_PHASE_BEGIN_PL_LEN = 16;
+
+void test_phase_begin_pack(char *out, uint32_t expected_n, uint32_t pps,
+                           uint32_t dir, uint32_t spread);
+// 0 on success, -1 if shorter than 12 bytes. `spread` is set to 0 for a
+// 12-byte (legacy) payload.
+int  test_phase_begin_unpack(const uint8_t *pl, int pl_len, uint32_t *expected_n,
+                             uint32_t *pps, uint32_t *dir, uint32_t *spread);
+
+// HELLO_ACK accept path: reject code 0 followed by a capability word. The
+// reject path keeps the old layout (code + reason string) precisely because an
+// old prober prints everything from offset 4 as text -- putting caps there
+// would surface as garbage in an operator-facing error message.
+int   test_hello_ack_accept_pack(char *out, u32_t caps);
+u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len);
+
 struct trace_stats_t {
     uint32_t n;
     uint32_t arrived_n;

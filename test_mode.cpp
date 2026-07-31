@@ -111,6 +111,36 @@ bool test_addr_same_ip(address_t a, address_t b) {
                   sizeof(a.inner.ipv6.sin6_addr)) == 0;
 }
 
+void test_phase_begin_pack(char *out, uint32_t expected_n, uint32_t pps,
+                           uint32_t dir, uint32_t spread) {
+    write_u32(out + 0,  expected_n);
+    write_u32(out + 4,  pps);
+    write_u32(out + 8,  dir);
+    write_u32(out + 12, spread);
+}
+
+int test_phase_begin_unpack(const uint8_t *pl, int pl_len, uint32_t *expected_n,
+                            uint32_t *pps, uint32_t *dir, uint32_t *spread) {
+    if (pl_len < 12) return -1;
+    char *p = (char *)pl;   // read_u32 takes char*, but never writes
+    *expected_n = read_u32(p + 0);
+    *pps        = read_u32(p + 4);
+    *dir        = read_u32(p + 8);
+    *spread     = (pl_len >= TEST_PHASE_BEGIN_PL_LEN) ? read_u32(p + 12) : 0u;
+    return 0;
+}
+
+int test_hello_ack_accept_pack(char *out, u32_t caps) {
+    write_u32(out + 0, 0u);   // TEST_REJECT_NONE
+    write_u32(out + 4, caps);
+    return 8;
+}
+
+u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len) {
+    if (pl_len < 8) return 0u;   // old responder: accept was 4 bytes
+    return read_u32((char *)pl + 4);
+}
+
 // ---------------- loss trace + statistics ----------------
 void trace_t::init(uint32_t n, uint32_t pps_) {
     if (n > TEST_MAX_EXPECTED_N) {
@@ -683,6 +713,48 @@ int test_mode_selftest() {
                "same ip with different ports must compare equal by ip");
         TCHECK(!test_addr_same_ip(a, c), "different ips must not compare equal by ip");
         TCHECK(test_addr_same_ip(a, a), "an address must compare equal to itself");
+    }
+
+    // ---- phase_begin / hello_ack payload codecs ----
+    {
+        char pl[TEST_PHASE_BEGIN_PL_LEN];
+        test_phase_begin_pack(pl, 1234, 200, 1, 1);
+        uint32_t n = 0, pps = 0, dir = 0, spread = 0;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, sizeof(pl),
+                                       &n, &pps, &dir, &spread) == 0,
+               "16-byte phase_begin payload must unpack");
+        TCHECK(n == 1234 && pps == 200 && dir == 1 && spread == 1,
+               "phase_begin fields must round-trip: got n=%u pps=%u dir=%u spread=%u",
+               n, pps, dir, spread);
+
+        // An old peer sends 12 bytes with no spread word. It must decode, and
+        // spread must default to 0 rather than reading past the payload.
+        uint32_t n2 = 0, pps2 = 0, dir2 = 0, spread2 = 7;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 12,
+                                       &n2, &pps2, &dir2, &spread2) == 0,
+               "12-byte legacy phase_begin payload must still unpack");
+        TCHECK(spread2 == 0, "legacy payload must default spread to 0, got %u", spread2);
+
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 11,
+                                       &n2, &pps2, &dir2, &spread2) == -1,
+               "a payload shorter than 12 bytes must be rejected");
+
+        // HELLO_ACK: accept path carries caps; the reject path is unchanged, so
+        // an old prober reading a reason string from offset 4 is unaffected.
+        char ack[16];
+        int alen = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE);
+        TCHECK(alen == 8, "accept ack must be 8 bytes, got %d", alen);
+        TCHECK(read_u32(ack) == 0, "accept ack must carry reject code 0");
+        TCHECK(test_hello_ack_caps((const uint8_t *)ack, alen) == TEST_CAP_REVERSE,
+               "caps word must round-trip");
+
+        // An old responder's 4-byte accept must read as "no capabilities"
+        // rather than as garbage -- this is the guard that stops a new prober
+        // from reporting a fabricated 100% loss against an old peer.
+        char old_ack[4];
+        write_u32(old_ack, 0);
+        TCHECK(test_hello_ack_caps((const uint8_t *)old_ack, 4) == 0,
+               "a 4-byte legacy accept must report no capabilities");
     }
 
     // ---- trace + stats ----

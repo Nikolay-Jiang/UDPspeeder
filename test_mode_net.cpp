@@ -337,15 +337,14 @@ static void responder_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
         g_resp.last_rx_us = get_current_time_us();
         note_fd_ep(w, src);
         mylog(log_info, "test: session from %s\n", src.get_str());
-        char ack[4];
-        write_u32(ack, (u32_t)TEST_REJECT_NONE);
-        responder_send(w->fd, src, TEST_HELLO_ACK, 0, ack, sizeof(ack));
+        char ack[8];
+        int ack_len = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE);
+        responder_send(w->fd, src, TEST_HELLO_ACK, 0, ack, ack_len);
 
     } else if (mt == TEST_PHASE_BEGIN) {
-        if (pl_len < 12) return;
-        uint32_t expected_n = read_u32((char *)pl + 0);
-        uint32_t pps        = read_u32((char *)pl + 4);
-        uint32_t dir        = read_u32((char *)pl + 8);  // 0 = prober->responder
+        uint32_t expected_n = 0, pps = 0, dir = 0, spread = 0;
+        if (test_phase_begin_unpack(pl, pl_len, &expected_n, &pps, &dir, &spread) != 0)
+            return;
 
         // A duplicate or delayed PHASE_BEGIN for the phase already running must
         // NOT re-init the trace: that discards every probe recorded so far and
@@ -500,6 +499,7 @@ struct prober_ctx_t {
     uint32_t      phase_send_fail = 0;
     uint32_t      run_send_fail = 0;
     uint32_t      run_send_total = 0;
+    u32_t         peer_caps = 0;
 };
 
 static prober_ctx_t g_pr;
@@ -608,10 +608,8 @@ static bool prober_exchange(int msg_type, int phase, const void *payload, int pa
 static void prober_run_phase(int phase, uint32_t pps, int duration_sec,
                               const std::vector<address_t> &dests) {
     uint32_t total = pps * (uint32_t)duration_sec;
-    char begin_pl[12];
-    write_u32(begin_pl + 0, total);
-    write_u32(begin_pl + 4, pps);
-    write_u32(begin_pl + 8, 0);   // dir 0 = prober -> responder
+    char begin_pl[TEST_PHASE_BEGIN_PL_LEN];
+    test_phase_begin_pack(begin_pl, total, pps, 0, dests.size() > 1 ? 1 : 0);
 
     if (!prober_exchange(TEST_PHASE_BEGIN, phase, begin_pl, sizeof(begin_pl),
                           TEST_PHASE_ACK, 1000, 5, NULL, NULL)) {
@@ -766,7 +764,9 @@ int test_mode_prober_loop() {
                          "      reason: %s\n", reason);
         myexit(-1);
     }
-    mylog(log_info, "test: responder reachable, RTT %.0f ms\n", g_pr.rtt_us / 1000.0);
+    g_pr.peer_caps = test_hello_ack_caps(ack_pl, ack_len);
+    mylog(log_info, "test: responder reachable, RTT %.0f ms, caps 0x%x\n",
+          g_pr.rtt_us / 1000.0, (unsigned)g_pr.peer_caps);
 
     std::vector<address_t> single;
     single.push_back(remote_addr);
