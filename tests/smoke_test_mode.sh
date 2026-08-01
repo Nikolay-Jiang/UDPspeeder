@@ -1,16 +1,34 @@
 #!/usr/bin/env bash
 # smoke_test_mode.sh — end-to-end check for --test-mode
 #
-# Round 1: --test-selftest (pure-function regression, expects 75 checks/0 fail)
+# Round 1: --test-selftest (pure-function regression, expects 0 failures)
 # Round 2: loopback probe with no injected loss   -> reported loss < 1%
 # Round 3: loopback probe with --random-drop 1000 (~10% injected) -> reported
 #          loss lands in a 5-16% band (injection is pseudo-random per run, so
 #          we assert a band rather than a point value), a recommendation
 #          section is rendered, and all three tier rows carry a real -f value.
+# Round 4: reverse (server -> client) phase on a clean loopback -> a real
+#          "server -> client" section is rendered, with reported loss <1% and
+#          neither "not measured" nor "no packets" text.
+# Round 5: --test-no-reverse suppresses the reverse phase -> the report says
+#          the direction was disabled and prints no downstream recommendation.
+# Round 6: --data-port-range on both ends -> the responder spreads the reverse
+#          (S4) phase across all 4 data ports (each fd answers the address it
+#          itself observed during S3, per Task 6's nat design), and the report
+#          renders a downstream port-range comparison line.
+# Round 7: --random-drop 1000 on the RESPONDER only (~10% injected downstream,
+#          nothing injected upstream) -> upstream loss stays <1% while the
+#          downstream figure lands in the same 5-16% band Round 3 asserts for
+#          the upstream direction. This is the only round that proves the
+#          downstream measurement tracks real loss rather than merely being
+#          non-zero: rounds 4 and 6 only ever see a clean loopback, against
+#          which a systematically-understating downstream path would still
+#          look perfect.
 #
 # Timing note: the rate-scan phase is a fixed 10s x 3 sub-phases regardless of
-# --test-duration/--test-pps, so each prober run takes ~36s minimum. The whole
-# script (selftest + 2 full prober runs) takes roughly ~2 minutes.
+# --test-duration/--test-pps, so each prober run still pays ~36s minimum in
+# addition to its S1/S2 (and, for round 6, S3/S4) phases. The whole script
+# (selftest + 6 full prober runs, one per Round 2-7) takes roughly 3 minutes.
 #
 # Usage: bash tests/smoke_test_mode.sh [/path/to/speederv2]
 # Exit 0 on pass, non-zero on failure.
@@ -174,6 +192,129 @@ echo "$OUT3" | grep -q "推荐配置" || { echo "  FAIL: no recommendation secti
 assert_all_tiers_have_fec "$OUT3"
 echo "  [drop] all three tier rows carry an -f value"
 echo "  [drop] ok"
+echo
+
+echo "Round 4: reverse phase on a clean loopback"
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" --log-level 4 \
+    > "$WORKDIR/r4_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+"$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --test-duration 2 --test-pps 100 > "$WORKDIR/r4_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "server -> client, 单端口" "$WORKDIR/r4_prober.log"; then
+    echo "  FAIL: no server -> client section in the report"
+    sed -n '1,80p' "$WORKDIR/r4_prober.log"
+    exit 1
+fi
+if grep -q "未测出结果\|未测量" "$WORKDIR/r4_prober.log"; then
+    echo "  FAIL: reverse direction reported as unmeasured on a clean loopback"
+    exit 1
+fi
+DOWN_LOSS=$(sed -n '/server -> client, 单端口/,/推荐配置/p' "$WORKDIR/r4_prober.log" \
+    | grep "丢包率" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+if [[ -z "$DOWN_LOSS" ]]; then
+    echo "  FAIL: could not parse downstream loss"
+    exit 1
+fi
+if awk -v v="$DOWN_LOSS" 'BEGIN{exit !(v > 1.0)}'; then
+    echo "  FAIL: downstream loss $DOWN_LOSS% too high on clean loopback"
+    exit 1
+fi
+echo "  [reverse-clean] downstream loss = $DOWN_LOSS%"
+echo "  [reverse-clean] ok"
+echo
+
+echo "Round 5: --test-no-reverse suppresses the reverse phase"
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" --log-level 4 \
+    > "$WORKDIR/r5_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+"$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --test-duration 2 --test-pps 100 --test-no-reverse \
+    > "$WORKDIR/r5_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "已通过 --test-no-reverse 关闭该方向" "$WORKDIR/r5_prober.log"; then
+    echo "  FAIL: --test-no-reverse did not report the direction as disabled"
+    exit 1
+fi
+if grep -q "推荐配置 (server -> client" "$WORKDIR/r5_prober.log"; then
+    echo "  FAIL: --test-no-reverse still produced a downstream recommendation"
+    exit 1
+fi
+echo "  [no-reverse] ok"
+echo
+
+echo "Round 6: multi-port reverse (--data-port-range on both ends)"
+DP_LO=$(( RESP_PORT + 100 ))
+DP_HI=$(( DP_LO + 3 ))
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" \
+    --data-port-range $DP_LO-$DP_HI --log-level 4 \
+    > "$WORKDIR/r6_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+"$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --data-port-range $DP_LO-$DP_HI --test-duration 2 --test-pps 100 \
+    > "$WORKDIR/r6_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "下行  单端口" "$WORKDIR/r6_prober.log"; then
+    echo "  FAIL: no downstream port-range comparison line"
+    sed -n '1,120p' "$WORKDIR/r6_prober.log"
+    exit 1
+fi
+if ! grep -q "reverse phase 4 will use 4 data port(s)" "$WORKDIR/r6_resp.log"; then
+    echo "  FAIL: responder did not spread the reverse phase across 4 data ports"
+    grep -i "reverse phase" "$WORKDIR/r6_resp.log" || true
+    exit 1
+fi
+echo "  [reverse-spread] ok"
+echo
+
+echo "Round 7: --random-drop 1000 on the RESPONDER (~10% injected downstream only)"
+# --random-drop on the responder is implemented only for TEST_PROBE in the
+# reverse sender (rev_tick_cb), so it injects loss into the server -> client
+# direction and leaves client -> server untouched. That asymmetry is the point:
+# it separates "the downstream number moves with real loss" from "the
+# downstream number is just a copy of the upstream one".
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" --random-drop 1000 \
+    --log-level 4 --disable-color > "$WORKDIR/r7_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+timeout 120 "$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$KEY" \
+    --test-duration 2 --test-pps 100 --disable-color \
+    > "$WORKDIR/r7_prober.log" 2>&1
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if ! grep -q "server -> client, 单端口" "$WORKDIR/r7_prober.log"; then
+    echo "  FAIL: no server -> client section in the report"
+    sed -n '1,120p' "$WORKDIR/r7_prober.log"
+    exit 1
+fi
+
+# Upstream: the prober injects nothing, so this must stay clean. If it does not,
+# the downstream figure below cannot be attributed to the injected loss.
+UP_LOSS7=$(extract_loss < "$WORKDIR/r7_prober.log")
+assert_is_number "$UP_LOSS7" "round-7 upstream"
+echo "  [down-drop] upstream loss = ${UP_LOSS7}%"
+awk -v l="$UP_LOSS7" 'BEGIN{ exit !(l < 1.0) }' \
+    || { echo "  FAIL: upstream reported ${UP_LOSS7}% but nothing was injected upstream"; exit 1; }
+
+# Downstream: same band as Round 3, for the same reason (pseudo-random
+# injection varies run to run). Anchored on the same section range Round 4 uses.
+DOWN_LOSS7=$(sed -n '/server -> client, 单端口/,/推荐配置/p' "$WORKDIR/r7_prober.log" \
+    | grep "丢包率" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+assert_is_number "$DOWN_LOSS7" "round-7 downstream"
+echo "  [down-drop] downstream loss = ${DOWN_LOSS7}%"
+awk -v l="$DOWN_LOSS7" 'BEGIN{ exit !(l > 5.0 && l < 16.0) }' \
+    || { echo "  FAIL: injected ~10% downstream but reported ${DOWN_LOSS7}% (expected band 5-16%)"; exit 1; }
+echo "  [down-drop] ok"
 echo
 
 echo "=== PASSED ==="

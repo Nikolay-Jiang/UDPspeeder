@@ -11,6 +11,7 @@ extern int    test_duration_sec;  // default 30, max 600
 extern int    test_pps;           // default 200, max 20000
 extern int    test_pkt_size;      // default 1200, max 1400
 extern double test_app_mbps;      // 0 => derive from probe rate
+extern int    test_no_reverse;     // 1 => skip the server -> client phases
 
 const int TEST_DURATION_MAX = 600;
 const int TEST_PPS_MAX      = 20000;
@@ -80,6 +81,99 @@ struct trace_t {
     void init(uint32_t n, uint32_t pps_);
     void record(uint32_t seq, my_time_t now_us);
 };
+
+// Re-base the pacer rather than paying out the backlog when it has fallen this
+// far behind (load spike, vm pause). Releasing a backlog as a burst would
+// manufacture the time-correlated loss that the -i recommendation is measured
+// from -- the sender would be measuring its own scheduling, not the link.
+const my_time_t PACER_SLIP_US = 50000;
+
+// Token-bucket pacer, shared by the prober's blocking send loop and the
+// responder's ev_timer. Deliberately clock-free: `now_us` is injected so the
+// selftest can drive it with synthetic time.
+struct pacer_t {
+    double    pps = 0.0;
+    double    credit = 0.0;
+    my_time_t last_us = 0;
+
+    void init(double pps_, my_time_t now_us);
+    // How many packets to send right now. Advances internal state.
+    int  tick(my_time_t now_us);
+};
+
+// Compares the ip only, ignoring the port. Needed because a symmetric nat
+// assigns a different external source port per destination port, so probes to
+// the data ports arrive from an address that address_t::operator== (a memcmp
+// over the whole sockaddr, common.h:301) reports as a different peer.
+bool test_addr_same_ip(address_t a, address_t b);
+
+// Capability bits advertised by the responder in HELLO_ACK's accept path.
+const u32_t TEST_CAP_REVERSE = 1u << 0;   // supports dir=1 (server -> client) phases
+
+// PHASE_BEGIN payload: six big-endian u32s. Only the first three are mandatory
+// -- an old responder validates `pl_len < 12` and reads exactly those -- so
+// every later word is append-only and backward compatible in both directions.
+//
+//   expected_n, pps, dir : the original three
+//   spread               : run this phase across the data ports
+//   cookie               : the responder's per-session return-routability
+//                          token, echoed from HELLO_ACK. Mandatory for dir=1,
+//                          ignored for dir=0 (see the note on responder_state_t
+//                          ::cookie in test_mode_net.cpp).
+//   pkt_size             : padded size the PROBE packets of this phase must
+//                          use. Carried on the wire so the reverse direction is
+//                          measured at the size the report claims, rather than
+//                          at whatever --test-pkt-size the responder happens to
+//                          have been started with.
+const int TEST_PHASE_BEGIN_PL_LEN = 24;
+
+struct test_phase_begin_t {
+    uint32_t expected_n = 0;
+    uint32_t pps        = 0;
+    uint32_t dir        = 0;
+    uint32_t spread     = 0;
+    uint32_t cookie     = 0;
+    uint32_t pkt_size   = 0;
+};
+
+// Returns the number of bytes written (TEST_PHASE_BEGIN_PL_LEN).
+int test_phase_begin_pack(char *out, const test_phase_begin_t &b);
+// 0 on success, -1 if shorter than 12 bytes. Every field past the mandatory
+// first three defaults to 0 when the payload stops short of it, so a legacy
+// (12- or 16-byte) sender decodes without reading past its own payload.
+int test_phase_begin_unpack(const uint8_t *pl, int pl_len, test_phase_begin_t *out);
+
+// Clamp a peer-supplied probe size into this build's legal range. `want == 0`
+// means the peer sent no size at all (legacy PHASE_BEGIN), in which case the
+// local configuration is used. Peer-controlled input, so it is never trusted
+// raw: an oversized value would be refused by test_encode and turn the whole
+// reverse phase into silence.
+int test_clamp_probe_size(uint32_t want, int fallback);
+
+// HELLO_ACK accept path: reject code 0, a capability word, then a per-session
+// random cookie. The reject path keeps the old layout (code + reason string)
+// precisely because an old prober prints everything from offset 4 as text --
+// putting caps or a cookie there would surface as garbage in an operator-facing
+// error message, so nothing is ever appended to the reject path.
+const int TEST_HELLO_ACK_ACCEPT_LEN = 12;
+int   test_hello_ack_accept_pack(char *out, u32_t caps, u32_t cookie);
+u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len);
+// 0 when the peer sent no cookie (an accept from an older build). 0 is never a
+// valid cookie, so it cannot be replayed as one.
+u32_t test_hello_ack_cookie(const uint8_t *pl, int pl_len);
+
+// PHASE_ACK payload, sent only for dir=1 phases: the number of ports the
+// responder will ACTUALLY send this phase from. It can be smaller than the
+// requested count, because a data fd that never saw this peer has no nat
+// mapping to reply through and is excluded. Without this on the wire the report
+// could only print the requested number while comparing a figure that may have
+// been measured over a single port.
+const int TEST_PHASE_ACK_PL_LEN = 4;
+void     test_phase_ack_pack(char *out, uint32_t ports);
+// 0 means "the peer did not report it" (upstream phase, or an older build) --
+// never "zero ports", which cannot happen since a phase with no usable fd is
+// refused outright.
+uint32_t test_phase_ack_ports(const uint8_t *pl, int pl_len);
 
 struct trace_stats_t {
     uint32_t n;
@@ -163,6 +257,22 @@ struct test_report_t {
     bool             have_up, have_down;
     recommendation_t up, down;
 
+    // Why the down direction is missing, so the report can say so instead of
+    // rendering a fabricated 100% loss.
+    enum down_status_t {
+        DOWN_OK = 0,
+        DOWN_DISABLED,      // --test-no-reverse
+        DOWN_UNSUPPORTED,   // peer did not advertise TEST_CAP_REVERSE
+        DOWN_NO_PACKETS     // peer said it would send, nothing arrived
+    };
+    down_status_t down_status;
+
+    // Probes the RESPONDER's local stack refused to send, reported over
+    // PHASE_END. Counted as loss by this end, so the report flags them --
+    // and must name the peer, or the operator will tune their own --test-pps.
+    uint32_t down_peer_send_fail_n;
+    uint32_t down_peer_send_total_n;
+
     // Probes the local stack refused to send (ENOBUFS/EWOULDBLOCK etc.),
     // summed over every phase. These are counted as lost by the responder but
     // are local backpressure, not link loss, so the report flags them rather
@@ -174,6 +284,20 @@ struct test_report_t {
     bool   have_spread;
     double spread_loss_up;   // loss rate on N ports, up direction
     int    spread_ports;
+    bool   have_spread_down;
+    double spread_loss_down;
+    // The port count the responder ACTUALLY sent the reverse phase from,
+    // reported back over TEST_PHASE_ACK. It can be smaller than
+    // spread_ports_down_req: a data fd that never saw this peer has no nat
+    // mapping to reply through and is excluded (see g_data_eps in
+    // test_mode_net.cpp). 0 means the peer never told us -- every PHASE_ACK for
+    // that phase was lost, or it is an older build -- in which case the report
+    // must say the count is unknown rather than print the requested one as if
+    // it had been confirmed.
+    int    spread_ports_down;
+    // What the prober asked for, kept alongside so the report can show both
+    // when they disagree instead of quietly comparing against a narrower run.
+    int    spread_ports_down_req;
 };
 
 void test_render_report(const test_report_t &r);

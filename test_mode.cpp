@@ -74,6 +74,102 @@ int test_decode(char *buf, int len, test_hdr_t *hdr_out,
     return (int)hdr_out->msg_type;
 }
 
+// ---------------- pacer ----------------
+void pacer_t::init(double pps_, my_time_t now_us) {
+    pps = pps_;
+    credit = 0.0;
+    last_us = now_us;
+}
+
+int pacer_t::tick(my_time_t now_us) {
+    // my_time_t is unsigned; a backwards clock would underflow into a huge
+    // elapsed value and dump a burst.
+    if (now_us <= last_us) return 0;
+    my_time_t elapsed = now_us - last_us;
+    if (elapsed > PACER_SLIP_US) elapsed = PACER_SLIP_US;
+    last_us = now_us;
+
+    credit += (double)elapsed * pps / 1e6;
+    // Cap banked credit so a single tick cannot emit a long backlog. The cap is
+    // one tick's worth plus one, which is >= the legitimate per-tick budget at
+    // every supported rate (20000pps -> 21 >= 20), so it never throttles.
+    double cap = pps / 1000.0 + 1.0;
+    if (credit > cap) credit = cap;
+
+    int n = (int)credit;
+    credit -= (double)n;
+    return n;
+}
+
+bool test_addr_same_ip(address_t a, address_t b) {
+    if (!a.is_vaild() || !b.is_vaild()) return false;
+    if (a.get_type() != b.get_type()) return false;
+    if (a.get_type() == AF_INET)
+        return memcmp(&a.inner.ipv4.sin_addr, &b.inner.ipv4.sin_addr,
+                      sizeof(a.inner.ipv4.sin_addr)) == 0;
+    return memcmp(&a.inner.ipv6.sin6_addr, &b.inner.ipv6.sin6_addr,
+                  sizeof(a.inner.ipv6.sin6_addr)) == 0;
+}
+
+int test_phase_begin_pack(char *out, const test_phase_begin_t &b) {
+    write_u32(out + 0,  b.expected_n);
+    write_u32(out + 4,  b.pps);
+    write_u32(out + 8,  b.dir);
+    write_u32(out + 12, b.spread);
+    write_u32(out + 16, b.cookie);
+    write_u32(out + 20, b.pkt_size);
+    return TEST_PHASE_BEGIN_PL_LEN;
+}
+
+int test_phase_begin_unpack(const uint8_t *pl, int pl_len, test_phase_begin_t *out) {
+    if (pl_len < 12) return -1;
+    char *p = (char *)pl;   // read_u32 takes char*, but never writes
+    *out = test_phase_begin_t();
+    out->expected_n = read_u32(p + 0);
+    out->pps        = read_u32(p + 4);
+    out->dir        = read_u32(p + 8);
+    // Each optional word is gated on its own end offset, so a payload that
+    // stops anywhere past the mandatory 12 bytes decodes what it does carry and
+    // leaves the rest at 0 -- never reading past the datagram.
+    if (pl_len >= 16) out->spread   = read_u32(p + 12);
+    if (pl_len >= 20) out->cookie   = read_u32(p + 16);
+    if (pl_len >= 24) out->pkt_size = read_u32(p + 20);
+    return 0;
+}
+
+int test_clamp_probe_size(uint32_t want, int fallback) {
+    if (want == 0) return fallback;
+    if (want < (uint32_t)TEST_PKT_SIZE_MIN) return TEST_PKT_SIZE_MIN;
+    if (want > (uint32_t)TEST_PKT_SIZE_MAX) return TEST_PKT_SIZE_MAX;
+    return (int)want;
+}
+
+int test_hello_ack_accept_pack(char *out, u32_t caps, u32_t cookie) {
+    write_u32(out + 0, 0u);   // TEST_REJECT_NONE
+    write_u32(out + 4, caps);
+    write_u32(out + 8, cookie);
+    return TEST_HELLO_ACK_ACCEPT_LEN;
+}
+
+u32_t test_hello_ack_caps(const uint8_t *pl, int pl_len) {
+    if (pl_len < 8) return 0u;   // old responder: accept was 4 bytes
+    return read_u32((char *)pl + 4);
+}
+
+u32_t test_hello_ack_cookie(const uint8_t *pl, int pl_len) {
+    if (pl_len < TEST_HELLO_ACK_ACCEPT_LEN) return 0u;
+    return read_u32((char *)pl + 8);
+}
+
+void test_phase_ack_pack(char *out, uint32_t ports) {
+    write_u32(out + 0, ports);
+}
+
+uint32_t test_phase_ack_ports(const uint8_t *pl, int pl_len) {
+    if (pl_len < TEST_PHASE_ACK_PL_LEN) return 0u;
+    return read_u32((char *)pl + 0);
+}
+
 // ---------------- loss trace + statistics ----------------
 void trace_t::init(uint32_t n, uint32_t pps_) {
     if (n > TEST_MAX_EXPECTED_N) {
@@ -455,20 +551,84 @@ void test_render_report(const test_report_t &r) {
     }
 
     if (r.have_up) render_direction("client -> server, 单端口", r.up);
-    if (r.have_down) render_direction("server -> client, 单端口", r.down);
+    if (r.have_down) {
+        render_direction("server -> client, 单端口", r.down);
+        if (r.down_peer_send_fail_n > 0) {
+            printf("\n--- 警告: 对端发送失败 ---\n");
+            printf("  对端有 %u/%u 个探测包未能发出(对端本地发送缓冲区满等)。\n",
+                   r.down_peer_send_fail_n, r.down_peer_send_total_n);
+            printf("  本端会把它们计为丢包,因此上方 server -> client 丢包率可能被高估;\n");
+            printf("  这部分并非链路丢包。注意需要调整的是**对端**的负载,而非本端 --test-pps。\n");
+        }
+    } else if (r.down_status != test_report_t::DOWN_OK) {
+        printf("\n--- 链路特征 (server -> client, 单端口) ---\n");
+        switch (r.down_status) {
+            case test_report_t::DOWN_DISABLED:
+                printf("  未测量: 已通过 --test-no-reverse 关闭该方向。\n");
+                break;
+            case test_report_t::DOWN_UNSUPPORTED:
+                printf("  未测量: 对端为较早的构建,不支持反向探测。\n");
+                printf("  两端升级到同一版本后可测出该方向。\n");
+                break;
+            case test_report_t::DOWN_NO_PACKETS:
+                printf("  未测出结果: 对端声称支持反向探测,但一个探测包也没有到达。\n");
+                printf("  可能原因: 对端到本端的 UDP 路径被阻断,或 NAT 映射已失效。\n");
+                printf("  注意这里不报 100%% 丢包 —— 没有收到数据与测得全丢是两回事。\n");
+                break;
+            default:
+                break;
+        }
+    }
 
-    if (r.have_spread) {
+    if (r.have_spread || r.have_spread_down) {
         printf("\n--- port-range 对比 ---\n");
-        double base = r.have_up ? r.up.stats.loss_rate : 0.0;
-        printf("  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
-               base * 100.0, r.spread_ports, r.spread_loss_up * 100.0);
-        if (base > 0.0 && r.spread_loss_up < base) {
-            printf("  结论: 多端口降低丢包 %.0f%%,port-range 对该链路有效\n",
-                   (base - r.spread_loss_up) / base * 100.0);
-        } else if (base > 0.0 && r.spread_loss_up > base) {
-            printf("  结论: 多端口未降低丢包,port-range 对该链路无收益\n");
-        } else {
-            printf("  结论: 单端口已无丢包,无法判断 port-range 收益\n");
+        if (r.have_spread) {
+            double base = r.have_up ? r.up.stats.loss_rate : 0.0;
+            printf("  上行  单端口 %.4f%%  |  配置 %d 端口 %.4f%%\n",
+                   base * 100.0, r.spread_ports, r.spread_loss_up * 100.0);
+            if (base > 0.0 && r.spread_loss_up < base)
+                printf("    结论: 多端口降低上行丢包 %.0f%%,port-range 对该方向有效\n",
+                       (base - r.spread_loss_up) / base * 100.0);
+            else if (base > 0.0)
+                printf("    结论: 多端口未降低上行丢包,port-range 对该方向无收益\n");
+            else
+                printf("    结论: 上行单端口已无丢包,无法判断 port-range 收益\n");
+        }
+        if (r.have_spread_down) {
+            // spread_ports_down is the count the responder reported it actually
+            // sent from, which can be smaller than the requested count when a
+            // data port never saw this peer. Printing the requested number here
+            // would compare single-port loss against a figure that may have been
+            // measured over one port -- so show what was really used, and say so
+            // whenever the two disagree.
+            double base = r.have_down ? r.down.stats.loss_rate : 0.0;
+            int used = r.spread_ports_down;
+            int req  = r.spread_ports_down_req;
+            if (used == 0)
+                printf("  下行  单端口 %.4f%%  |  请求 %d 端口(对端实际参与数未知) %.4f%%\n",
+                       base * 100.0, req, r.spread_loss_down * 100.0);
+            else if (used != req)
+                printf("  下行  单端口 %.4f%%  |  实际 %d 端口(请求 %d) %.4f%%\n",
+                       base * 100.0, used, req, r.spread_loss_down * 100.0);
+            else
+                printf("  下行  单端口 %.4f%%  |  %d 端口 %.4f%%\n",
+                       base * 100.0, used, r.spread_loss_down * 100.0);
+
+            if (used == 1) {
+                // Not a multi-port measurement at all: whatever the numbers do,
+                // they cannot be attributed to port-range.
+                printf("    结论: 对端实际只用 1 个端口回打,该行并非多端口对比,"
+                       "无法判断 port-range 下行收益\n");
+            } else if (used == 0) {
+                printf("    结论: 对端未报告实际参与端口数,该差异不能归因于 port-range\n");
+            } else if (base > 0.0 && r.spread_loss_down < base) {
+                printf("    结论: %d 端口降低下行丢包 %.0f%%,port-range 对该方向有效\n",
+                       used, (base - r.spread_loss_down) / base * 100.0);
+            } else if (base > 0.0) {
+                printf("    结论: %d 端口未降低下行丢包,port-range 对该方向无收益\n", used);
+            } else {
+                printf("    结论: 下行单端口已无丢包,无法判断 port-range 收益\n");
+            }
         }
     }
 
@@ -583,6 +743,233 @@ int test_mode_selftest() {
         // over-capacity request must be refused
         TCHECK(test_encode(TEST_PROBE, 0, 0, pl, 4, buf, 32, 1200) == -1,
                "encode must refuse when out_cap too small");
+    }
+
+    // ---- pacer ----
+    {
+        // Exact rate: 200pps over 1000 x 1ms ticks must emit exactly 200.
+        pacer_t p;
+        p.init(200.0, 0);
+        int total = 0;
+        for (int k = 1; k <= 1000; k++) total += p.tick((my_time_t)k * 1000);
+        TCHECK(total == 200, "200pps over 1000 ticks must emit exactly 200, got %d", total);
+
+        // High rate must not be throttled by the burst cap: 20000pps at a 1ms
+        // tick legitimately owes 20 packets per tick.
+        pacer_t hp;
+        hp.init(20000.0, 0);
+        int hi = hp.tick(1000);
+        TCHECK(hi == 20, "20000pps at 1ms tick must emit 20, got %d", hi);
+
+        // Burst cap: a 200ms stall must NOT pay out the whole backlog. At
+        // 200pps that would be 40 packets in one go, manufacturing exactly the
+        // time-correlated loss the -i recommendation is derived from.
+        pacer_t b;
+        b.init(200.0, 0);
+        int burst = b.tick(200000);
+        TCHECK(burst == 1, "a 200ms stall at 200pps must emit 1, not a backlog, got %d", burst);
+
+        // ...and the stall must not leave banked credit behind that pays out on
+        // the next tick either.
+        int after = b.tick(201000);
+        TCHECK(after <= 1, "tick after a stall must not release a backlog, got %d", after);
+
+        // Low rate: 1pps must emit its first packet at t=1s, not before.
+        pacer_t lo;
+        lo.init(1.0, 0);
+        int early = 0;
+        for (int k = 1; k <= 999; k++) early += lo.tick((my_time_t)k * 1000);
+        TCHECK(early == 0, "1pps must emit nothing in the first 999ms, got %d", early);
+        int at_one_sec = lo.tick(1000000);
+        TCHECK(at_one_sec == 1, "1pps must emit exactly 1 at t=1s, got %d", at_one_sec);
+
+        // Non-monotonic clock must not produce negative or bogus budgets.
+        pacer_t nm;
+        nm.init(200.0, 1000000);
+        TCHECK(nm.tick(999000) == 0, "a backwards clock must emit 0");
+    }
+
+    // ---- address comparison ----
+    {
+        char s1[] = "127.0.0.1:1000";
+        char s2[] = "127.0.0.1:2000";
+        char s3[] = "127.0.0.2:1000";
+        address_t a, b, c;
+        a.from_str(s1);
+        b.from_str(s2);
+        c.from_str(s3);
+
+        // Documents the root cause: operator== includes the port, which is why
+        // a symmetric nat's per-destination source ports split one peer.
+        TCHECK(!(a == b), "operator== must treat differing ports as different addresses");
+        TCHECK(test_addr_same_ip(a, b),
+               "same ip with different ports must compare equal by ip");
+        TCHECK(!test_addr_same_ip(a, c), "different ips must not compare equal by ip");
+        TCHECK(test_addr_same_ip(a, a), "an address must compare equal to itself");
+
+        // The ipv6 branch: same code path, different union member. Untested it
+        // could compare the wrong 16 bytes and either split one peer (S3/S4
+        // report ~100% loss) or merge two.
+        char s6a[] = "[fd00::1]:1000";
+        char s6b[] = "[fd00::1]:2000";
+        char s6c[] = "[fd00::2]:1000";
+        address_t a6, b6, c6;
+        a6.from_str(s6a);
+        b6.from_str(s6b);
+        c6.from_str(s6c);
+        TCHECK(test_addr_same_ip(a6, b6),
+               "ipv6: same ip with different ports must compare equal by ip");
+        TCHECK(!test_addr_same_ip(a6, c6),
+               "ipv6: different ips must not compare equal by ip");
+        TCHECK(!test_addr_same_ip(a6, a),
+               "an ipv4 and an ipv6 address must never compare equal by ip");
+
+        // The address-family guard, pinned by the one pair that makes it
+        // load-bearing. address_t::clear() zeroes the whole union, and an ipv4
+        // sockaddr leaves zeroes exactly where sockaddr_in6 keeps sin6_addr --
+        // so without the family check "[::]" would memcmp equal to EVERY ipv4
+        // address, and the responder's probe gate would accept probes from any
+        // ipv4 peer while pinned to an ipv6 one. Any other ipv6 value passes
+        // this by luck, which is why the unspecified address is used here.
+        char s6z[] = "[::]:1000";
+        address_t z6;
+        z6.from_str(s6z);
+        TCHECK(!test_addr_same_ip(z6, a),
+               "the unspecified ipv6 address must not compare equal to an ipv4 address");
+
+        // An address that was never filled in must compare equal to NOTHING.
+        // This is the default that guards the pinning gate: if it returned true,
+        // an unpinned session would accept probes from any source.
+        address_t none;
+        none.clear();
+        TCHECK(!none.is_vaild(), "a cleared address must not be valid");
+        TCHECK(!test_addr_same_ip(none, a),
+               "an invalid address must not compare equal to a valid one");
+        TCHECK(!test_addr_same_ip(none, none),
+               "two invalid addresses must not compare equal either");
+    }
+
+    // ---- phase_begin / hello_ack / phase_ack payload codecs ----
+    {
+        char pl[TEST_PHASE_BEGIN_PL_LEN];
+        test_phase_begin_t src;
+        src.expected_n = 1234;
+        src.pps        = 200;
+        src.dir        = 1;
+        src.spread     = 1;
+        src.cookie     = 0xdeadbeefu;
+        src.pkt_size   = 400;
+        TCHECK(test_phase_begin_pack(pl, src) == TEST_PHASE_BEGIN_PL_LEN,
+               "phase_begin pack must write %d bytes", TEST_PHASE_BEGIN_PL_LEN);
+
+        test_phase_begin_t got;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, sizeof(pl), &got) == 0,
+               "%d-byte phase_begin payload must unpack", TEST_PHASE_BEGIN_PL_LEN);
+        TCHECK(got.expected_n == 1234 && got.pps == 200 && got.dir == 1 &&
+                   got.spread == 1 && got.cookie == 0xdeadbeefu && got.pkt_size == 400,
+               "phase_begin fields must round-trip: got n=%u pps=%u dir=%u spread=%u "
+               "cookie=%u pkt_size=%u",
+               got.expected_n, got.pps, got.dir, got.spread, got.cookie, got.pkt_size);
+
+        // Truncated payloads: each optional word must default to 0 rather than
+        // being read out of a datagram that never carried it. A cookie read out
+        // of bounds could accidentally match and reopen the amplifier; a
+        // pkt_size read out of bounds would silently change the probe size.
+        test_phase_begin_t g12;
+        g12.spread = g12.cookie = g12.pkt_size = 7;   // must be overwritten
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 12, &g12) == 0,
+               "12-byte legacy phase_begin payload must still unpack");
+        TCHECK(g12.expected_n == 1234 && g12.pps == 200 && g12.dir == 1,
+               "12-byte payload must still decode the three mandatory words");
+        TCHECK(g12.spread == 0 && g12.cookie == 0 && g12.pkt_size == 0,
+               "12-byte payload must default spread/cookie/pkt_size to 0, got %u/%u/%u",
+               g12.spread, g12.cookie, g12.pkt_size);
+
+        test_phase_begin_t g16;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 16, &g16) == 0,
+               "16-byte phase_begin payload must unpack");
+        TCHECK(g16.spread == 1 && g16.cookie == 0 && g16.pkt_size == 0,
+               "16-byte payload must decode spread but default cookie/pkt_size to 0, "
+               "got spread=%u cookie=%u pkt_size=%u", g16.spread, g16.cookie, g16.pkt_size);
+
+        test_phase_begin_t g20;
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 20, &g20) == 0,
+               "20-byte phase_begin payload must unpack");
+        TCHECK(g20.cookie == 0xdeadbeefu && g20.pkt_size == 0,
+               "20-byte payload must decode the cookie but default pkt_size to 0, "
+               "got cookie=%u pkt_size=%u", g20.cookie, g20.pkt_size);
+
+        TCHECK(test_phase_begin_unpack((const uint8_t *)pl, 11, &got) == -1,
+               "a payload shorter than 12 bytes must be rejected");
+
+        // Peer-supplied probe size is clamped to this build's own limits: an
+        // out-of-range value would make test_encode refuse every probe and turn
+        // the whole reverse phase into silence.
+        TCHECK(test_clamp_probe_size(400, 1200) == 400,
+               "an in-range probe size must be used as-is");
+        TCHECK(test_clamp_probe_size(0, 1200) == 1200,
+               "probe size 0 means 'peer sent none' and must fall back to the local value");
+        TCHECK(test_clamp_probe_size(1, 1200) == TEST_PKT_SIZE_MIN,
+               "an undersized probe size must clamp up to the minimum");
+        TCHECK(test_clamp_probe_size(65535, 1200) == TEST_PKT_SIZE_MAX,
+               "an oversized probe size must clamp down to the maximum");
+
+        // HELLO_ACK: accept path carries caps and the session cookie; the reject
+        // path is unchanged, so an old prober reading a reason string from
+        // offset 4 is unaffected.
+        char ack[16];
+        int alen = test_hello_ack_accept_pack(ack, TEST_CAP_REVERSE, 0x01020304u);
+        TCHECK(alen == TEST_HELLO_ACK_ACCEPT_LEN, "accept ack must be %d bytes, got %d",
+               TEST_HELLO_ACK_ACCEPT_LEN, alen);
+        TCHECK(read_u32(ack) == 0, "accept ack must carry reject code 0");
+        TCHECK(test_hello_ack_caps((const uint8_t *)ack, alen) == TEST_CAP_REVERSE,
+               "caps word must round-trip");
+        TCHECK(test_hello_ack_cookie((const uint8_t *)ack, alen) == 0x01020304u,
+               "session cookie must round-trip");
+
+        // An old responder's 4-byte accept must read as "no capabilities"
+        // rather than as garbage -- this is the guard that stops a new prober
+        // from reporting a fabricated 100% loss against an old peer.
+        char old_ack[4];
+        write_u32(old_ack, 0);
+        TCHECK(test_hello_ack_caps((const uint8_t *)old_ack, 4) == 0,
+               "a 4-byte legacy accept must report no capabilities");
+        TCHECK(test_hello_ack_cookie((const uint8_t *)old_ack, 4) == 0,
+               "a 4-byte legacy accept must report no cookie");
+        // An 8-byte accept (caps but no cookie) must not read a cookie out of
+        // the bytes after it: 0 is the only safe answer, and 0 is never a valid
+        // cookie, so it can never be echoed back into a passing check.
+        char ack8[8];
+        write_u32(ack8 + 0, 0);
+        write_u32(ack8 + 4, TEST_CAP_REVERSE);
+        TCHECK(test_hello_ack_cookie((const uint8_t *)ack8, 8) == 0,
+               "an 8-byte accept must report no cookie");
+
+        // The session cookie is minted from the kernel CSPRNG. We cannot test
+        // unpredictability (untestable), but we CAN pin the two contract
+        // properties the mint site relies on: every draw is non-zero (so the
+        // "0 == cookie absent" sentinel is never produced) and the source is
+        // not a stuck constant. Sixteen identical CSPRNG draws is a ~1/2^480
+        // event, so this asserts liveness without depending on any particular
+        // value.
+        {
+            u32_t first = get_secure_random_number_nz();
+            bool all_same = true;
+            for (int i = 0; i < 16; i++) {
+                u32_t c = get_secure_random_number_nz();
+                TCHECK(c != 0, "secure cookie draw must never be zero");
+                if (c != first) all_same = false;
+            }
+            TCHECK(!all_same, "secure cookie draws must not all be identical");
+        }
+
+        // PHASE_ACK: the participating-port count for a reverse phase.
+        char pack[TEST_PHASE_ACK_PL_LEN];
+        test_phase_ack_pack(pack, 4);
+        TCHECK(test_phase_ack_ports((const uint8_t *)pack, sizeof(pack)) == 4,
+               "phase_ack port count must round-trip");
+        TCHECK(test_phase_ack_ports((const uint8_t *)pack, 0) == 0,
+               "an empty phase_ack payload must report 0 (== not reported)");
     }
 
     // ---- trace + stats ----
