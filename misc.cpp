@@ -1115,5 +1115,50 @@ void process_arg(int argc, char *argv[]) {
             mylog(log_info, "control-mac: legacy\n");
     }
 
+    // --out-addr must be in the same family as the peer we will be talking to.
+    // Without this the mismatch surfaces as a bind() failure whose message
+    // ("socket bind error=...") names neither option, leaving the operator no
+    // way to see which two arguments conflict.
+    if (out_addr != 0) {
+        address_t *peer = 0;
+        const char *peer_opt = 0;
+        if (program_mode == client_mode && port_range_mode) {
+            // Data destinations are derived from ctrl_addr, not remote_addr.
+            peer = &ctrl_addr;
+            peer_opt = "--control-host";
+        } else if (working_mode == test_working_mode && program_mode == server_mode) {
+            // The test responder opens no outbound socket, so --out-addr is
+            // inert for it and there is nothing to compare against.
+            peer = 0;
+        } else {
+            peer = &remote_addr;
+            peer_opt = "-r";
+        }
+
+        if (peer != 0 && peer->is_vaild() && out_addr->get_type() != peer->get_type()) {
+            // get_str() returns a single static buffer, so two calls in one
+            // argument list would print the same address twice -- in the very
+            // message whose job is to show the operator both sides.
+            char out_buf[max_addr_len];
+            char peer_buf[max_addr_len];
+            out_addr->to_str(out_buf);
+            peer->to_str(peer_buf);
+            mylog(log_fatal,
+                  "--out-addr %s and %s %s are different address families.\n"
+                  "       both must be ipv4, or both ipv6.\n",
+                  out_buf, peer_opt, peer_buf);
+            myexit(-1);
+        }
+
+        if (port_range_mode && program_mode == client_mode && out_addr->get_port() != 0) {
+            mylog(log_fatal,
+                  "--out-addr must use port 0 in --port-range-mode.\n"
+                  "       the client opens two outbound sockets (data and control), and\n"
+                  "       binding both to port %u would fail with EADDRINUSE.\n",
+                  out_addr->get_port());
+            myexit(-1);
+        }
+    }
+
     print_parameter();
 }
