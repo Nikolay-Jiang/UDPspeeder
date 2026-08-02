@@ -7,6 +7,10 @@
 #          symptom looked like a firewall drop.
 # Round 2: port-range mode over ipv6.
 # Round 3: test mode over ipv6 (prober reaches responder, report renders).
+# Round 4: --out-addr family mismatch is refused at startup.
+# Round 5: a non-zero --out-addr port is refused where >1 outbound socket
+#          is opened (server, port-range client).
+# Round 6: ...and is NOT refused for a test-mode prober, which opens one.
 #
 # Usage: bash tests/smoke_ipv6.sh [/path/to/speederv2]
 # Exit 0 on pass or on a loud skip; non-zero on failure.
@@ -46,6 +50,7 @@ CTRL_PORT=$(( BASE_PORT + 3 ))
 DATA_LO=$(( BASE_PORT + 10 ))
 DATA_HI=$(( BASE_PORT + 13 ))
 TEST_PORT=$(( BASE_PORT + 20 ))
+OUT_PORT=$(( BASE_PORT + 21 ))
 KEY="smoke_ipv6_$$"
 
 PIDS=()
@@ -149,6 +154,101 @@ if ! grep -q "client -> server, 单端口" /tmp/smoke_ipv6_prober.$$; then
 fi
 rm -f /tmp/smoke_ipv6_resp.$$ /tmp/smoke_ipv6_prober.$$
 echo "  [test-mode-v6] ok"
+echo
+
+# --- Rounds 4-6: --out-addr startup validation -------------------------------
+#
+# The validator is a four-branch, mode-dependent peer selection, and it has
+# already shipped one real bug (a missing working_mode test that silently
+# accepted a mismatched config). Rounds 4 and 5 pin the two refusals; Round 6
+# pins a case that must NOT be refused, so the validator cannot regress into
+# always-firing -- which is how a "passing" refusal test would otherwise hide
+# a validator that rejects everything.
+
+# Asserts BOTH a non-zero exit and the specific message. Exit status alone
+# would also be satisfied by a crash or an unrelated failure, and the whole
+# point here is that the refusal fires for the right reason.
+expect_refusal() {
+    local label="$1" want="$2"; shift 2
+    local out rc
+    set +e
+    out=$(timeout 10 "$BINARY" "$@" 2>&1)
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        echo "  FAIL [$label]: expected a non-zero exit, got 0"
+        printf '%s\n' "$out" | tail -6
+        exit 1
+    fi
+    if ! printf '%s\n' "$out" | grep -qa "$want"; then
+        echo "  FAIL [$label]: exited $rc but without the expected message"
+        echo "         wanted: $want"
+        printf '%s\n' "$out" | tail -6
+        exit 1
+    fi
+    echo "  [$label] refused as expected (exit $rc)"
+}
+
+echo "Round 4: --out-addr family mismatch is refused"
+expect_refusal "family-mismatch-client" "different address families" \
+    -c -l"[::1]:$CLIENT_PORT" -r "[::1]:$TUNNEL_PORT" -k "$KEY" --out-addr "127.0.0.1:0"
+expect_refusal "family-mismatch-server" "different address families" \
+    -s -l"[::1]:$TUNNEL_PORT" -r "[::1]:$ECHO_PORT" -k "$KEY" --out-addr "127.0.0.1:0"
+echo
+
+echo "Round 5: non-zero --out-addr port is refused where >1 outbound socket is opened"
+# The server opens one outbound socket per connected client. Before this was
+# checked, the server started fine, served the first client, and then died
+# with EADDRINUSE when a second one appeared -- taking every client with it.
+expect_refusal "nonzero-port-server" "must use port 0" \
+    -s -l"[::1]:$TUNNEL_PORT" -r "[::1]:$ECHO_PORT" -k "$KEY" --out-addr "[::1]:$OUT_PORT"
+# The port-range client opens two (data + control).
+expect_refusal "nonzero-port-port-range-client" "must use port 0" \
+    -c --port-range-mode --control-host "[::1]:$CTRL_PORT" \
+    --data-port-range "$DATA_LO-$DATA_HI" -l"[::1]:$CLIENT_PORT" \
+    -r "[::1]:$CTRL_PORT" -k "$KEY" --out-addr "[::1]:$OUT_PORT"
+echo
+
+echo "Round 6: a test-mode prober is NOT refused a non-zero --out-addr port"
+# This is the exemption the earlier bug got wrong: a test-mode client is
+# dispatched to test_mode_prober_loop() and opens ONE outbound socket, so
+# neither refusal applies -- even with --port-range-mode set, which is the
+# combination that previously mis-selected --control-host as the peer and
+# refused on both counts. Run it for real against a live responder rather
+# than merely checking that it starts.
+"$BINARY" -s --test-mode -l"[::1]:$TEST_PORT" -k "$KEY" --log-level 4 \
+    > /tmp/smoke_ipv6_resp.$$ 2>&1 & PIDS+=($!)
+sleep 1
+set +e
+"$BINARY" -c --test-mode --port-range-mode --control-host "[::1]:$CTRL_PORT" \
+    -r"[::1]:$TEST_PORT" -k "$KEY" --out-addr "[::1]:$OUT_PORT" \
+    --test-duration 1 --test-pps 20 > /tmp/smoke_ipv6_prober.$$ 2>&1
+PROBER_RC=$?
+set -e
+stop_all
+if grep -qa "must use port 0\|different address families" /tmp/smoke_ipv6_prober.$$; then
+    echo "  FAIL: the prober was refused, but it opens only one outbound socket"
+    sed -n '1,20p' /tmp/smoke_ipv6_prober.$$
+    exit 1
+fi
+if [[ "$PROBER_RC" -ne 0 ]]; then
+    echo "  FAIL: prober exited $PROBER_RC"
+    sed -n '1,40p' /tmp/smoke_ipv6_prober.$$
+    exit 1
+fi
+if ! grep -qa "client -> server, 单端口" /tmp/smoke_ipv6_prober.$$; then
+    echo "  FAIL: prober was allowed to start but rendered no report"
+    sed -n '1,40p' /tmp/smoke_ipv6_prober.$$
+    exit 1
+fi
+# Prove the pinned port was actually honoured, not silently ignored.
+if ! grep -qa "\[::1\]:$OUT_PORT" /tmp/smoke_ipv6_resp.$$; then
+    echo "  FAIL: responder never saw the pinned source port $OUT_PORT"
+    sed -n '1,40p' /tmp/smoke_ipv6_resp.$$
+    exit 1
+fi
+rm -f /tmp/smoke_ipv6_resp.$$ /tmp/smoke_ipv6_prober.$$
+echo "  [test-mode-out-addr-allowed] ok"
 echo
 
 echo "=== PASSED ==="
