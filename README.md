@@ -97,6 +97,44 @@ See [UDPspeeder + openvpn config guide](https://github.com/wangyu-/UDPspeeder/wi
 
 # Advanced Topic
 
+### IPv6
+
+UDPspeeder speaks IPv6 everywhere it speaks IPv4. Write IPv6 addresses in
+brackets, the same way you would in a URL:
+
+```bash
+# server
+./speederv2 -s -l"[::]:4096" -r "[::1]:7777" -f20:10 -k "passwd"
+
+# client
+./speederv2 -c -l"[::1]:3333" -r "[2001:db8::1]:4096" -f20:10 -k "passwd"
+```
+
+Each instance is **single-family**: an address family is chosen from your
+arguments and used for every socket that instance opens. There is no
+dual-stack mode — one instance cannot serve IPv4 and IPv6 clients at the
+same time. Run a second instance for the other family.
+
+Where each side gets its family from:
+
+| Side | Derived from |
+|---|---|
+| Client, normal mode | `-r` |
+| Client, port-range mode | `--control-host` (**not** `-r`) |
+| Server | `-l` |
+| Test mode prober | `-r` |
+| Test mode responder | `-l` |
+
+**Port-range server without `-l`.** `-l` is optional for a port-range server,
+and without it there is nothing to derive a family from, so it binds the IPv4
+wildcard address `0.0.0.0` and says so in its log. Pass `-l"[::]:0"` to listen
+on IPv6 instead.
+
+**`--out-addr` must match.** Its address family has to match the peer's, or
+startup is refused with both addresses printed. In port-range mode its port
+must be `0`: the client opens two outbound sockets, and binding both to a fixed
+port would fail with `EADDRINUSE`.
+
 ### Port-Range Mode (Defeat Per-Flow ISP Rate Limiting)
 
 **Note:** This feature is optional and disabled by default.

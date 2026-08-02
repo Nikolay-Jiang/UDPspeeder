@@ -26,6 +26,7 @@ static void print_help() {
     printf("usage:\n");
     printf("    run as client: ./this_program -c -l local_listen_ip:local_port -r server_ip:server_port  [options]\n");
     printf("    run as server: ./this_program -s -l server_listen_ip:server_port -r remote_ip:remote_port  [options]\n");
+    printf("    ipv6 addresses use bracket form everywhere an address is accepted, e.g. -l\"[::]:4096\" -r\"[2001:db8::1]:4096\"\n");
     printf("\n");
     printf("common options, must be same on both sides:\n");
     printf("    -k,--key              <string>        key for simple xor encryption. if not set, xor is disabled\n");
@@ -66,6 +67,8 @@ static void print_help() {
     printf("    --disable-fec         <number>        completely disable fec, turn the program into a normal udp tunnel\n");
     printf("    --sock-buf            <number>        buf size for socket, >=10 and <=10240, unit: kbyte, default: 1024\n");
     printf("    --out-addr            ip:port         force all output packets of '-r' end to go through this address, port 0 for random port.\n");
+    printf("                                          for ipv6 use bracket form, e.g. [::1]:0. must be the same address family as the peer;\n");
+    printf("                                          in --port-range-mode the port must be 0.\n");
 #ifdef __linux__
     printf("    --out-interface       <string>        force all output packets of '-r' end to go through this interface.\n");
 #endif
