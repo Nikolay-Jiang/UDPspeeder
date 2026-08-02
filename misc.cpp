@@ -1102,7 +1102,11 @@ void process_arg(int argc, char *argv[]) {
             mylog(log_info, "port-range-mode: control-port=%d data-ports=%s (%d ports)\n",
                   ctrl_port, data_port_range_str, port_range_mgr.count());
         } else {
-            if (ctrl_addr.get_port() == 0) {
+            // ctrl_addr is a zero-initialized global until --control-host
+            // parses one. get_port() asserts is_vaild() internally, so
+            // testing the port first turns the missing-option case into an
+            // assertion failure and a core dump instead of this message.
+            if (!ctrl_addr.is_vaild() || ctrl_addr.get_port() == 0) {
                 mylog(log_fatal, "--port-range-mode requires --control-host on client\n");
                 myexit(-1);
             }
