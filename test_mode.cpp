@@ -849,6 +849,36 @@ int test_mode_selftest() {
                "two invalid addresses must not compare equal either");
     }
 
+    // ---- wildcard_like ----
+    {
+        address_t w4;
+        w4.wildcard_like(AF_INET, 1234);
+        TCHECK(w4.is_vaild(), "wildcard_like(AF_INET) must produce a valid address");
+        TCHECK(w4.get_type() == AF_INET, "wildcard_like(AF_INET) family must be AF_INET");
+        TCHECK(w4.get_port() == 1234, "wildcard_like must carry the port, got %u", w4.get_port());
+        TCHECK(w4.inner.ipv4.sin_addr.s_addr == INADDR_ANY,
+               "wildcard_like(AF_INET) address must be 0.0.0.0");
+
+        address_t w6;
+        w6.wildcard_like(AF_INET6, 4321);
+        TCHECK(w6.is_vaild(), "wildcard_like(AF_INET6) must produce a valid address");
+        TCHECK(w6.get_type() == AF_INET6, "wildcard_like(AF_INET6) family must be AF_INET6");
+        TCHECK(w6.get_port() == 4321, "wildcard_like must carry the port, got %u", w6.get_port());
+        TCHECK(memcmp(&w6.inner.ipv6.sin6_addr, &in6addr_any, sizeof(in6addr_any)) == 0,
+               "wildcard_like(AF_INET6) address must be ::");
+
+        // The bug class this helper exists to prevent is an ipv4 literal being
+        // used for an ipv6 peer, so pin that the two families are distinguishable.
+        TCHECK(!test_addr_same_ip(w4, w6),
+               "the two wildcard families must not compare equal by ip");
+
+        // A non-zero port must survive; using 0 for both would let a helper that
+        // silently ignored `port` pass every other assertion here.
+        address_t w0;
+        w0.wildcard_like(AF_INET6, 0);
+        TCHECK(w0.get_port() == 0, "wildcard_like(port 0) must give port 0, got %u", w0.get_port());
+    }
+
     // ---- phase_begin / hello_ack / phase_ack payload codecs ----
     {
         char pl[TEST_PHASE_BEGIN_PL_LEN];
