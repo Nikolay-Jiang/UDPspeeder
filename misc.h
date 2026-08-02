@@ -42,6 +42,12 @@ extern address_t local_addr, remote_addr;
 extern address_t *out_addr;
 extern char *out_interface;
 
+// Local address for an outbound socket: --out-addr when the operator pinned
+// one, otherwise the wildcard of the PEER's family. The family must never come
+// from a string literal -- three sites once hardcoded "0.0.0.0:0" and silently
+// broke ipv6 for the features that used them.
+void outbound_bind_addr(address_t &out, address_t peer);
+
 extern conn_manager_t conn_manager;
 extern delay_manager_t delay_manager;
 extern fd_manager_t fd_manager;

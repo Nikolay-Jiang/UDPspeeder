@@ -442,14 +442,23 @@ int tunnel_client_event_loop() {
     ev_timer ctrl_timer;
 
     if (port_range_mode) {
+        // The family comes from --control-host, NOT from -r. set_from_ack()
+        // below builds every data-port destination from ctrl_addr as its base,
+        // and remote_addr is not used on this path in port-range mode -- a
+        // reader will assume -r is the source of truth, and it is not.
+        address_t bind_addr;
+        outbound_bind_addr(bind_addr, ctrl_addr);
+
         // Unconnected data socket — sendto with varying dst port
-        address_t ephemeral;
-        ephemeral.from_str((char *)"0.0.0.0:0");
-        assert(new_listen_socket2(remote_fd, ephemeral) == 0);
+        assert(new_listen_socket2(remote_fd, bind_addr, out_interface) == 0);
         remote_fd64 = fd_manager.create(remote_fd);
 
-        // Control socket
-        assert(new_listen_socket2(g_ctrl_fd, ephemeral) == 0);
+        // Control socket. Both sockets are outbound to the same server, so
+        // both take --out-addr and --out-interface; restricting only one would
+        // be meaningless. Binding both to the same address is safe because
+        // --out-addr's port is required to be 0 in port-range mode (validated
+        // in process_arg); a fixed port would fail here with EADDRINUSE.
+        assert(new_listen_socket2(g_ctrl_fd, bind_addr, out_interface) == 0);
         memset(&g_ctrl_server_stor, 0, sizeof(g_ctrl_server_stor));
         g_ctrl_server_len = ctrl_addr.get_len();
         memcpy(&g_ctrl_server_stor, &ctrl_addr.inner, g_ctrl_server_len);

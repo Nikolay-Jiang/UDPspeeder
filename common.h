@@ -426,7 +426,10 @@ int new_listen_socket(int &fd, u32_t ip, int port);
 
 int new_connected_socket(int &fd, u32_t ip, int port);
 
-int new_listen_socket2(int &fd, address_t &addr);
+// interface_string, when non-NULL, applies SO_BINDTODEVICE -- the same
+// treatment new_connected_socket2 already gives its socket. It is defaulted so
+// the existing call sites need no change.
+int new_listen_socket2(int &fd, address_t &addr, char *interface_string = NULL);
 int new_connected_socket2(int &fd, address_t &addr, address_t *bind_addr, char *out_interface);
 
 struct not_copy_able_t {

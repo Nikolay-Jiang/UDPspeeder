@@ -34,6 +34,18 @@ char *out_interface = 0;
 // char local_ip[100], remote_ip[100];
 // int local_port = -1, remote_port = -1;
 
+// Local address for an outbound socket: --out-addr when the operator pinned
+// one, otherwise the wildcard of the PEER's family. The family must never come
+// from a string literal -- three sites once hardcoded "0.0.0.0:0" and silently
+// broke ipv6 for the features that used them.
+void outbound_bind_addr(address_t &out, address_t peer) {
+    if (out_addr) {
+        out = *out_addr;
+    } else {
+        out.wildcard_like(peer.get_type(), 0);
+    }
+}
+
 conn_manager_t conn_manager;
 delay_manager_t delay_manager;
 fd_manager_t fd_manager;
