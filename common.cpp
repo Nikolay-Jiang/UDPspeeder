@@ -755,6 +755,16 @@ int new_connected_socket(int &fd,u32_t ip,int port)
 */
 int new_listen_socket2(int &fd, address_t &addr, char *interface_string) {
     fd = socket(addr.get_type(), SOCK_DGRAM, IPPROTO_UDP);
+    // Without this, a failed socket() falls through to bind(-1,...) and the
+    // operator is told "socket bind error=9:Bad file descriptor" -- a message
+    // that names neither the option nor the cause. The common real-world case
+    // is a kernel booted with ipv6.disable=1, where every ipv6 configuration
+    // fails here with EAFNOSUPPORT.
+    if (fd < 0) {
+        mylog(log_fatal, "[%s]create %s udp socket error=%s\n", addr.get_str(),
+              addr.get_type() == AF_INET6 ? "ipv6" : "ipv4", get_sock_error());
+        myexit(1);
+    }
 
     int yes = 1;
 
