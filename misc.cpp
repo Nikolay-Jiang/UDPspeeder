@@ -34,6 +34,18 @@ char *out_interface = 0;
 // char local_ip[100], remote_ip[100];
 // int local_port = -1, remote_port = -1;
 
+// Local address for an outbound socket: --out-addr when the operator pinned
+// one, otherwise the wildcard of the PEER's family. The family must never come
+// from a string literal -- three sites once hardcoded "0.0.0.0:0" and silently
+// broke ipv6 for the features that used them.
+void outbound_bind_addr(address_t &out, address_t peer) {
+    if (out_addr) {
+        out = *out_addr;
+    } else {
+        out.wildcard_like(peer.get_type(), 0);
+    }
+}
+
 conn_manager_t conn_manager;
 delay_manager_t delay_manager;
 fd_manager_t fd_manager;
@@ -1090,7 +1102,11 @@ void process_arg(int argc, char *argv[]) {
             mylog(log_info, "port-range-mode: control-port=%d data-ports=%s (%d ports)\n",
                   ctrl_port, data_port_range_str, port_range_mgr.count());
         } else {
-            if (ctrl_addr.get_port() == 0) {
+            // ctrl_addr is a zero-initialized global until --control-host
+            // parses one. get_port() asserts is_vaild() internally, so
+            // testing the port first turns the missing-option case into an
+            // assertion failure and a core dump instead of this message.
+            if (!ctrl_addr.is_vaild() || ctrl_addr.get_port() == 0) {
                 mylog(log_fatal, "--port-range-mode requires --control-host on client\n");
                 myexit(-1);
             }
@@ -1101,6 +1117,91 @@ void process_arg(int argc, char *argv[]) {
             mylog(log_info, "control-mac: siphash\n");
         else
             mylog(log_info, "control-mac: legacy\n");
+    }
+
+    // --out-addr pins the local end of this instance's outbound ('-r' side)
+    // sockets. Both checks below turn on the same fact -- which role this is,
+    // and therefore how many outbound sockets it opens and who it talks to --
+    // so that fact is established once, here:
+    //
+    //   role                            outbound sockets   family peer
+    //   client, normal                  1                  -r
+    //   client, port-range              2 (data + control)  --control-host
+    //   client, test mode (prober)      1                  -r
+    //   server, tunnel (any mode)       N, one per conv     -r
+    //   server, test mode (responder)   0                   none
+    //
+    // Deciding the family peer and the socket count in two independent
+    // conditions is exactly how the port rule came to cover the port-range
+    // client and silently miss the server, which opens one socket per
+    // connected client and so dies on the *second* one.
+    if (out_addr != 0) {
+        address_t *peer = 0;      // 0 => no outbound socket, --out-addr is inert
+        const char *peer_opt = 0;
+        int one_socket_only = 0;  // may a non-zero --out-addr port be pinned?
+        const char *multi_reason = 0;
+
+        if (working_mode == test_working_mode) {
+            if (program_mode == server_mode) {
+                // The responder answers from the socket the probe arrived on
+                // and opens no outbound socket at all.
+                peer = 0;
+            } else {
+                // A test-mode client is dispatched to test_mode_prober_loop(),
+                // never tunnel_client_event_loop() -- so even with
+                // --port-range-mode set it does not take the two-socket
+                // (data + control) path. One socket, against remote_addr.
+                peer = &remote_addr;
+                peer_opt = "-r";
+                one_socket_only = 1;
+            }
+        } else if (program_mode == client_mode) {
+            if (port_range_mode) {
+                // Data destinations are derived from ctrl_addr, not remote_addr.
+                peer = &ctrl_addr;
+                peer_opt = "--control-host";
+                multi_reason = "a port-range client opens two outbound sockets (data and control)";
+            } else {
+                peer = &remote_addr;
+                peer_opt = "-r";
+                one_socket_only = 1;
+            }
+        } else {
+            // Tunnel server. It creates one outbound socket per conv, on
+            // demand as clients appear (tunnel_server.cpp). Port-range mode
+            // changes only the listen side, so this holds in both modes.
+            peer = &remote_addr;
+            peer_opt = "-r";
+            multi_reason = "a server opens one outbound socket per connected client";
+        }
+
+        if (peer != 0 && peer->is_vaild() && out_addr->get_type() != peer->get_type()) {
+            // get_str() returns a single static buffer, so two calls in one
+            // argument list would print the same address twice -- in the very
+            // message whose job is to show the operator both sides.
+            char out_buf[max_addr_len];
+            char peer_buf[max_addr_len];
+            out_addr->to_str(out_buf);
+            peer->to_str(peer_buf);
+            mylog(log_fatal,
+                  "--out-addr %s and %s %s are different address families.\n"
+                  "       both must be ipv4, or both ipv6.\n",
+                  out_buf, peer_opt, peer_buf);
+            myexit(-1);
+        }
+
+        // A non-zero port pins one specific local port, so it is only ever
+        // safe where exactly one outbound socket is opened. Anywhere else the
+        // second bind fails with EADDRINUSE -- at startup for the port-range
+        // client, but only once a second client appears for the server.
+        if (!one_socket_only && multi_reason != 0 && out_addr->get_port() != 0) {
+            mylog(log_fatal,
+                  "--out-addr must use port 0 here.\n"
+                  "       %s,\n"
+                  "       and binding them all to port %u would fail with EADDRINUSE.\n",
+                  multi_reason, out_addr->get_port());
+            myexit(-1);
+        }
     }
 
     print_parameter();

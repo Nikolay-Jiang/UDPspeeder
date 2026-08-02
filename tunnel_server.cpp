@@ -446,14 +446,20 @@ int tunnel_server_event_loop() {
     struct ev_io local_listen_watcher;
 
     if (port_range_mode) {
-        // Build a valid 0.0.0.0 base address for binding; local_addr may be
-        // unset when -l is omitted in port-range-mode server.
+        // Bind base for the control and data ports. With -l given the family
+        // follows it; without -l there is nothing to derive it from.
         address_t bind_base;
         if (local_addr.is_vaild()) {
             bind_base = local_addr;
         } else {
-            u32_t any = INADDR_ANY;
-            bind_base.from_ip_port_new(AF_INET, &any, 0);
+            // Keep the historical ipv4 default so existing deployments are
+            // unaffected -- but say so out loud. This is the only place in the
+            // program that guesses an address family, and a wrong guess looks
+            // exactly like a firewall drop or a key mismatch from the client
+            // side, with both logs otherwise clean.
+            bind_base.wildcard_like(AF_INET, 0);
+            mylog(log_info, "port-range-mode: -l was not given, binding the ipv4 wildcard "
+                            "address (0.0.0.0). pass -l\"[::]:0\" to listen on ipv6 instead.\n");
         }
 
         // Bind control socket

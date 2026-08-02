@@ -753,8 +753,18 @@ int new_connected_socket(int &fd,u32_t ip,int port)
         return 0;
 }
 */
-int new_listen_socket2(int &fd, address_t &addr) {
+int new_listen_socket2(int &fd, address_t &addr, char *interface_string) {
     fd = socket(addr.get_type(), SOCK_DGRAM, IPPROTO_UDP);
+    // Without this, a failed socket() falls through to bind(-1,...) and the
+    // operator is told "socket bind error=9:Bad file descriptor" -- a message
+    // that names neither the option nor the cause. The common real-world case
+    // is a kernel booted with ipv6.disable=1, where every ipv6 configuration
+    // fails here with EAFNOSUPPORT.
+    if (fd < 0) {
+        mylog(log_fatal, "[%s]create %s udp socket error=%s\n", addr.get_str(),
+              addr.get_type() == AF_INET6 ? "ipv6" : "ipv4", get_sock_error());
+        myexit(1);
+    }
 
     int yes = 1;
 
@@ -763,6 +773,14 @@ int new_listen_socket2(int &fd, address_t &addr) {
         // perror("socket bind error");
         myexit(1);
     }
+
+#ifdef __linux__
+    if (interface_string && ::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, interface_string, strlen(interface_string)) < 0) {
+        mylog(log_fatal, "socket interface bind error=%s\n", get_sock_error());
+        myexit(1);
+    }
+#endif
+
     setnonblocking(fd);
     set_buf_size(fd, socket_buf_size);
 

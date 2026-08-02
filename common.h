@@ -237,6 +237,29 @@ struct address_t  // TODO scope id
         return 0;
     }
 
+    // Wildcard bind address in a given family: 0.0.0.0:port or [::]:port.
+    //
+    // The family must come from the peer, never from a string literal. Three
+    // sites once built an ephemeral socket from a hardcoded "0.0.0.0:0" and
+    // silently broke ipv6 for the features that used them -- and the symptom
+    // was "cannot connect", indistinguishable from a firewall drop or a key
+    // mismatch. Deriving the family through a named function makes the next
+    // person adding a socket confront the question.
+    void wildcard_like(u32_t family, int port) {
+        clear();
+        if (family == AF_INET) {
+            // INADDR_ANY is a macro constant, so it has no address of its own.
+            u32_t any = INADDR_ANY;
+            from_ip_port_new(AF_INET, &any, port);
+        } else if (family == AF_INET6) {
+            // in6addr_any is a real object provided by libc; the const cast is
+            // only needed because from_ip_port_new takes void* and never writes.
+            from_ip_port_new(AF_INET6, (void *)&in6addr_any, port);
+        } else {
+            assert(0 == 1);
+        }
+    }
+
     int from_str(char *str);
 
     int from_str_ip_only(char *str);
@@ -403,7 +426,10 @@ int new_listen_socket(int &fd, u32_t ip, int port);
 
 int new_connected_socket(int &fd, u32_t ip, int port);
 
-int new_listen_socket2(int &fd, address_t &addr);
+// interface_string, when non-NULL, applies SO_BINDTODEVICE -- the same
+// treatment new_connected_socket2 already gives its socket. It is defaulted so
+// the existing call sites need no change.
+int new_listen_socket2(int &fd, address_t &addr, char *interface_string = NULL);
 int new_connected_socket2(int &fd, address_t &addr, address_t *bind_addr, char *out_interface);
 
 struct not_copy_able_t {

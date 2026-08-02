@@ -1301,9 +1301,14 @@ int test_mode_prober_loop() {
     signal(SIGINT, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
 
-    address_t ephemeral;
-    ephemeral.from_str((char *)"0.0.0.0:0");
-    if (new_listen_socket2(g_pr.fd, ephemeral) != 0) {
+    // The family comes from -r, the peer this prober is measuring against.
+    // --out-addr / --out-interface are honoured because the point of test mode
+    // is to measure the path the tunnel will actually use: if the tunnel is
+    // pinned to an interface and the probe goes out the default route, the
+    // report describes a different link than the one being configured.
+    address_t bind_addr;
+    outbound_bind_addr(bind_addr, remote_addr);
+    if (new_listen_socket2(g_pr.fd, bind_addr, out_interface) != 0) {
         mylog(log_fatal, "test: failed to create prober socket\n");
         myexit(-1);
     }

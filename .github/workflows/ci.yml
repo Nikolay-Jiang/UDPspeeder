@@ -33,3 +33,7 @@ jobs:
       - name: Smoke test
         run: bash tests/smoke.sh ./speederv2
         timeout-minutes: 2
+
+      - name: IPv6 smoke test
+        run: bash tests/smoke_ipv6.sh ./speederv2
+        timeout-minutes: 3
