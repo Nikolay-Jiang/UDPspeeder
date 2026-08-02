@@ -67,8 +67,9 @@ static void print_help() {
     printf("    --disable-fec         <number>        completely disable fec, turn the program into a normal udp tunnel\n");
     printf("    --sock-buf            <number>        buf size for socket, >=10 and <=10240, unit: kbyte, default: 1024\n");
     printf("    --out-addr            ip:port         force all output packets of '-r' end to go through this address, port 0 for random port.\n");
-    printf("                                          for ipv6 use bracket form, e.g. [::1]:0. must be the same address family as the peer;\n");
-    printf("                                          in --port-range-mode the port must be 0.\n");
+    printf("                                          for ipv6 use bracket form, e.g. [::1]:0. must be the same address family as the peer.\n");
+    printf("                                          the port must be 0 wherever more than one outbound socket is opened: on a server (one\n");
+    printf("                                          per connected client), and on a --port-range-mode client (data + control).\n");
 #ifdef __linux__
     printf("    --out-interface       <string>        force all output packets of '-r' end to go through this interface.\n");
 #endif

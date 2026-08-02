@@ -1119,30 +1119,60 @@ void process_arg(int argc, char *argv[]) {
             mylog(log_info, "control-mac: legacy\n");
     }
 
-    // --out-addr must be in the same family as the peer we will be talking to.
-    // Without this the mismatch surfaces as a bind() failure whose message
-    // ("socket bind error=...") names neither option, leaving the operator no
-    // way to see which two arguments conflict.
+    // --out-addr pins the local end of this instance's outbound ('-r' side)
+    // sockets. Both checks below turn on the same fact -- which role this is,
+    // and therefore how many outbound sockets it opens and who it talks to --
+    // so that fact is established once, here:
+    //
+    //   role                            outbound sockets   family peer
+    //   client, normal                  1                  -r
+    //   client, port-range              2 (data + control)  --control-host
+    //   client, test mode (prober)      1                  -r
+    //   server, tunnel (any mode)       N, one per conv     -r
+    //   server, test mode (responder)   0                   none
+    //
+    // Deciding the family peer and the socket count in two independent
+    // conditions is exactly how the port rule came to cover the port-range
+    // client and silently miss the server, which opens one socket per
+    // connected client and so dies on the *second* one.
     if (out_addr != 0) {
-        address_t *peer = 0;
+        address_t *peer = 0;      // 0 => no outbound socket, --out-addr is inert
         const char *peer_opt = 0;
-        if (program_mode == client_mode && port_range_mode && working_mode != test_working_mode) {
-            // Data destinations are derived from ctrl_addr, not remote_addr.
-            peer = &ctrl_addr;
-            peer_opt = "--control-host";
-        } else if (working_mode == test_working_mode && program_mode == server_mode) {
-            // The test responder opens no outbound socket, so --out-addr is
-            // inert for it and there is nothing to compare against.
-            peer = 0;
+        int one_socket_only = 0;  // may a non-zero --out-addr port be pinned?
+        const char *multi_reason = 0;
+
+        if (working_mode == test_working_mode) {
+            if (program_mode == server_mode) {
+                // The responder answers from the socket the probe arrived on
+                // and opens no outbound socket at all.
+                peer = 0;
+            } else {
+                // A test-mode client is dispatched to test_mode_prober_loop(),
+                // never tunnel_client_event_loop() -- so even with
+                // --port-range-mode set it does not take the two-socket
+                // (data + control) path. One socket, against remote_addr.
+                peer = &remote_addr;
+                peer_opt = "-r";
+                one_socket_only = 1;
+            }
+        } else if (program_mode == client_mode) {
+            if (port_range_mode) {
+                // Data destinations are derived from ctrl_addr, not remote_addr.
+                peer = &ctrl_addr;
+                peer_opt = "--control-host";
+                multi_reason = "a port-range client opens two outbound sockets (data and control)";
+            } else {
+                peer = &remote_addr;
+                peer_opt = "-r";
+                one_socket_only = 1;
+            }
         } else {
-            // A test-mode client is dispatched to test_mode_prober_loop(),
-            // never tunnel_client_event_loop() -- so even with
-            // --port-range-mode set, it does not take the two-socket
-            // (data + control) path. It opens a single outbound socket
-            // against remote_addr, same as a non-port-range client, so -r
-            // is its real peer regardless of port_range_mode.
+            // Tunnel server. It creates one outbound socket per conv, on
+            // demand as clients appear (tunnel_server.cpp). Port-range mode
+            // changes only the listen side, so this holds in both modes.
             peer = &remote_addr;
             peer_opt = "-r";
+            multi_reason = "a server opens one outbound socket per connected client";
         }
 
         if (peer != 0 && peer->is_vaild() && out_addr->get_type() != peer->get_type()) {
@@ -1160,16 +1190,16 @@ void process_arg(int argc, char *argv[]) {
             myexit(-1);
         }
 
-        // Same test-mode exception as above: test_mode_prober_loop() opens
-        // only one outbound socket, so forcing port 0 here would be a false
-        // refusal with no EADDRINUSE risk behind it.
-        if (port_range_mode && program_mode == client_mode && working_mode != test_working_mode &&
-            out_addr->get_port() != 0) {
+        // A non-zero port pins one specific local port, so it is only ever
+        // safe where exactly one outbound socket is opened. Anywhere else the
+        // second bind fails with EADDRINUSE -- at startup for the port-range
+        // client, but only once a second client appears for the server.
+        if (!one_socket_only && multi_reason != 0 && out_addr->get_port() != 0) {
             mylog(log_fatal,
-                  "--out-addr must use port 0 in --port-range-mode.\n"
-                  "       the client opens two outbound sockets (data and control), and\n"
-                  "       binding both to port %u would fail with EADDRINUSE.\n",
-                  out_addr->get_port());
+                  "--out-addr must use port 0 here.\n"
+                  "       %s,\n"
+                  "       and binding them all to port %u would fail with EADDRINUSE.\n",
+                  multi_reason, out_addr->get_port());
             myexit(-1);
         }
     }
