@@ -854,20 +854,45 @@ brackets, the same way you would in a URL:
 ./speederv2 -c -l"[::1]:3333" -r "[2001:db8::1]:4096" -f20:10 -k "passwd"
 ```
 
-Each instance is **single-family**: an address family is chosen from your
-arguments and used for every socket that instance opens. There is no
-dual-stack mode — one instance cannot serve IPv4 and IPv6 clients at the
-same time. Run a second instance for the other family.
+> **AMENDED 2026-08-02, post-review.** The two paragraphs originally mandated
+> here — "Each instance is **single-family** … one instance cannot serve IPv4
+> and IPv6 clients at the same time" — were **false**, and were shipped to
+> `README.md` verbatim because this step prescribed them. Both halves were
+> disproven by running the binary:
+>
+> - `-l` and `-r` families are fully independent on both roles; nothing in the
+>   code compares them. A v4 local socket with a v6 tunnel socket delivered 20/20.
+> - `IPV6_V6ONLY` is never set anywhere in the tree, so a `[::]` listener
+>   accepts IPv4 clients as v4-mapped on a default Linux host. Verified 20/20,
+>   logged as `new connection from [::ffff:127.0.0.1]:53372`.
+>
+> The corrected text below replaces it. See the amendment in spec §1 for the
+> ruling that `IPV6_V6ONLY` must **not** be set to make the original claim true.
 
-Where each side gets its family from:
+Each socket takes its family from the argument that describes it, and the
+sockets are **independent of each other**. An instance is not locked to one
+family: a client may listen for its application on IPv4 while carrying the
+tunnel over IPv6, and a server may accept an IPv6 tunnel while forwarding to
+an IPv4 application.
 
-| Side | Derived from |
+The one pair that is **not** independent is the tunnel-facing pair — a
+client's `-r` and the server's `-l` — because those are the two ends of one
+socket conversation.
+
+Which argument each socket derives its family from:
+
+| Socket | Derived from |
 |---|---|
-| Client, normal mode | `-r` |
-| Client, port-range mode | `--control-host` (**not** `-r`) |
-| Server | `-l` |
+| Client, tunnel-facing, normal mode | `-r` |
+| Client, tunnel-facing, port-range mode | `--control-host` (**not** `-r`) |
+| Client, application-facing | `-l` |
+| Server, tunnel-facing | `-l` |
+| Server, application-facing | `-r` |
 | Test mode prober | `-r` |
 | Test mode responder | `-l` |
+
+**A `[::]` listener also accepts IPv4 clients**, as v4-mapped addresses, since
+`IPV6_V6ONLY` is never set. Binding `[::]` does not exclude IPv4.
 
 **Port-range server without `-l`.** `-l` is optional for a port-range server,
 and without it there is nothing to derive a family from, so it binds the IPv4
@@ -886,8 +911,9 @@ In `main.cpp`, in the options where an address is accepted, note the bracket for
 
 ```c
     printf("    --out-addr            ip:port         force all output packets of '-r' end to go through this address, port 0 for random port.\n");
-    printf("                                          for ipv6 use bracket form, e.g. [::1]:0. must be the same address family as the peer;\n");
-    printf("                                          in --port-range-mode the port must be 0.\n");
+    printf("                                          for ipv6 use bracket form, e.g. [::1]:0. must be the same address family as the peer.\n");
+    printf("                                          the port must be 0 wherever more than one outbound socket is opened: on a server (one\n");
+    printf("                                          per connected client), and on a --port-range-mode client (data + control).\n");
 ```
 
 and add one line to the usage block near the top of `print_help`, after the two `run as` lines:
@@ -927,7 +953,7 @@ The bracket syntax has been supported since address_t was written and was
 never written down anywhere, which is part of why nobody noticed when two
 features stopped honouring it. Records the per-side family derivation --
 including that a port-range client takes its family from --control-host
-rather than -r -- and the single-family, no-dual-stack limit.
+rather than -r -- and that a [::] listener still accepts v4-mapped clients.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```

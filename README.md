@@ -110,20 +110,52 @@ brackets, the same way you would in a URL:
 ./speederv2 -c -l"[::1]:3333" -r "[2001:db8::1]:4096" -f20:10 -k "passwd"
 ```
 
-Each instance is **single-family**: an address family is chosen from your
-arguments and used for every socket that instance opens. There is no
-dual-stack mode — one instance cannot serve IPv4 and IPv6 clients at the
-same time. Run a second instance for the other family.
+Each socket takes its family from the argument that describes it, and the
+sockets are **independent of each other**. An instance is not locked to one
+family: a client may listen for its application on IPv4 while carrying the
+tunnel over IPv6, and a server may accept an IPv6 tunnel while forwarding to
+an IPv4 application. So a v4-only application can be carried over a v6-only
+path, with no second instance and no gateway in between:
 
-Where each side gets its family from:
+```bash
+# server: v6 tunnel in, v4 application out
+./speederv2 -s -l"[::1]:4096" -r "127.0.0.1:7777" -f20:10 -k "passwd"
 
-| Side | Derived from |
+# client: v4 application in, v6 tunnel out
+./speederv2 -c -l"127.0.0.1:3333" -r "[::1]:4096" -f20:10 -k "passwd"
+```
+
+The one pair that is **not** independent is the tunnel-facing pair — a
+client's `-r` and the server's `-l` — because those are the two ends of one
+socket conversation. The client's `-r` has to be an address the server's
+listening socket actually accepts: the same family always works, and pointing
+a v6 `-r` at a server bound to `0.0.0.0`, or a v4 `-r` at a server bound to a
+specific v6 address, silently delivers nothing.
+
+Which argument each socket derives its family from:
+
+| Socket | Derived from |
 |---|---|
-| Client, normal mode | `-r` |
-| Client, port-range mode | `--control-host` (**not** `-r`) |
-| Server | `-l` |
+| Client, tunnel-facing, normal mode | `-r` |
+| Client, tunnel-facing, port-range mode | `--control-host` (**not** `-r`) |
+| Client, application-facing | `-l` |
+| Server, tunnel-facing | `-l` |
+| Server, application-facing | `-r` |
 | Test mode prober | `-r` |
 | Test mode responder | `-l` |
+
+**A `[::]` listener also accepts IPv4 clients.** UDPspeeder never sets
+`IPV6_V6ONLY`, so on a default Linux host (`net.ipv6.bindv6only=0`) a server
+started with `-l"[::]:4096"` accepts IPv4 clients as well, and logs them as
+v4-mapped addresses:
+
+```
+new connection from [::ffff:127.0.0.1]:53372
+```
+
+Binding `[::]` therefore does **not** exclude IPv4. If you intend to serve
+only IPv6, bind a specific IPv6 address rather than the wildcard, or block
+IPv4 at the firewall — do not rely on `[::]` to do it for you.
 
 **Port-range server without `-l`.** `-l` is optional for a port-range server,
 and without it there is nothing to derive a family from, so it binds the IPv4
@@ -131,9 +163,22 @@ wildcard address `0.0.0.0` and says so in its log. Pass `-l"[::]:0"` to listen
 on IPv6 instead.
 
 **`--out-addr` must match.** Its address family has to match the peer's, or
-startup is refused with both addresses printed. In port-range mode its port
-must be `0`: the client opens two outbound sockets, and binding both to a fixed
-port would fail with `EADDRINUSE`.
+startup is refused with both addresses printed. Its **port** must be `0`
+wherever the instance opens more than one outbound socket, since a non-zero
+port pins one specific local port and the second bind would fail with
+`EADDRINUSE`:
+
+| Role | Outbound sockets | Non-zero port allowed? |
+|---|---|---|
+| Client, normal mode | 1 | yes |
+| Client, port-range mode | 2 (data + control) | no |
+| Client, test mode (prober) | 1 | yes |
+| Server (either mode) | one per connected client | no |
+| Server, test mode (responder) | 0 — `--out-addr` is unused | n/a |
+
+Both conditions are checked at startup, so a bad combination is refused
+immediately rather than surfacing later as a bind failure — which, on a
+server, would otherwise happen only once a *second* client connected.
 
 ### Port-Range Mode (Defeat Per-Flow ISP Rate Limiting)
 
@@ -362,6 +407,12 @@ synthetic traces (isolated loss, bursty loss, total loss, etc.) without
 touching the network.
 
 ### Full Options
+
+> **This transcript is out of date.** It was captured in 2018 and does not list
+> several options added since, including `--out-addr`, port-range mode, test
+> mode and the IPv6 guidance above. Run `./speederv2 --help` for the current,
+> authoritative list.
+
 ```
 UDPspeeder V2
 git version: 3e248b414c    build date: Aug  5 2018 21:59:52
