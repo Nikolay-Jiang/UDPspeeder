@@ -54,6 +54,11 @@ cleanup() {
         [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
+    # Belt-and-braces: Round 3's test-mode reports land here, and its client
+    # probe runs in the foreground (no &), so a non-zero exit there triggers
+    # `set -e` before any per-branch `rm -f` runs. Clean up unconditionally
+    # on every exit path rather than relying on each branch to remember.
+    rm -f "/tmp/smoke_ipv6_resp.$$" "/tmp/smoke_ipv6_prober.$$"
 }
 trap cleanup EXIT
 
