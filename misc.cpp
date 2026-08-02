@@ -1122,7 +1122,7 @@ void process_arg(int argc, char *argv[]) {
     if (out_addr != 0) {
         address_t *peer = 0;
         const char *peer_opt = 0;
-        if (program_mode == client_mode && port_range_mode) {
+        if (program_mode == client_mode && port_range_mode && working_mode != test_working_mode) {
             // Data destinations are derived from ctrl_addr, not remote_addr.
             peer = &ctrl_addr;
             peer_opt = "--control-host";
@@ -1131,6 +1131,12 @@ void process_arg(int argc, char *argv[]) {
             // inert for it and there is nothing to compare against.
             peer = 0;
         } else {
+            // A test-mode client is dispatched to test_mode_prober_loop(),
+            // never tunnel_client_event_loop() -- so even with
+            // --port-range-mode set, it does not take the two-socket
+            // (data + control) path. It opens a single outbound socket
+            // against remote_addr, same as a non-port-range client, so -r
+            // is its real peer regardless of port_range_mode.
             peer = &remote_addr;
             peer_opt = "-r";
         }
@@ -1150,7 +1156,11 @@ void process_arg(int argc, char *argv[]) {
             myexit(-1);
         }
 
-        if (port_range_mode && program_mode == client_mode && out_addr->get_port() != 0) {
+        // Same test-mode exception as above: test_mode_prober_loop() opens
+        // only one outbound socket, so forcing port 0 here would be a false
+        // refusal with no EADDRINUSE risk behind it.
+        if (port_range_mode && program_mode == client_mode && working_mode != test_working_mode &&
+            out_addr->get_port() != 0) {
             mylog(log_fatal,
                   "--out-addr must use port 0 in --port-range-mode.\n"
                   "       the client opens two outbound sockets (data and control), and\n"
