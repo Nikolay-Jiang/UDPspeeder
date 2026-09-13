@@ -9,7 +9,7 @@
 #include "log.h"
 #include "packet.h"
 #include "misc.h"
-#include "crc32/Crc32.h"
+#include "auth.h"
 #include <algorithm>
 
 int iv_min = 4;
@@ -289,52 +289,17 @@ int my_send(const dest_t &dest, char *data, int len) {
     return 0;
 }
 
-int put_conv0(u32_t conv, const char *input, int len_in, char *&output, int &len_out) {
-    assert(len_in >= 0);
-    static char buf[buf_len];
-    output = buf;
-    u32_t n_conv = htonl(conv);
-    memcpy(output, &n_conv, sizeof(n_conv));
-    memcpy(output + sizeof(n_conv), input, len_in);
-    u32_t crc32 = (u32_t)crc32_fast(output, len_in + sizeof(crc32));
-    u32_t crc32_n = htonl(crc32);
-    len_out = len_in + (int)(sizeof(n_conv)) + (int)sizeof(crc32_n);
-    memcpy(output + len_in + (int)(sizeof(n_conv)), &crc32_n, sizeof(crc32_n));
-    return 0;
-}
-int get_conv0(u32_t &conv, const char *input, int len_in, char *&output, int &len_out) {
-    assert(len_in >= 0);
-    u32_t n_conv;
-    memcpy(&n_conv, input, sizeof(n_conv));
-    conv = ntohl(n_conv);
-    output = (char *)input + sizeof(n_conv);
-    u32_t crc32_n;
-    len_out = len_in - (int)sizeof(n_conv) - (int)sizeof(crc32_n);
-    if (len_out < 0) {
-        mylog(log_debug, "len_out<0\n");
-        return -1;
-    }
-    memcpy(&crc32_n, input + len_in - (int)sizeof(crc32_n), sizeof(crc32_n));
-    u32_t crc32 = ntohl(crc32_n);
-    if (crc32 != (u32_t)crc32_fast(input, len_in - sizeof(crc32_n))) {
-        mylog(log_debug, "crc32 check failed\n");
-        return -1;
-    }
-    return 0;
-}
-int put_crc32(char *s, int &len) {
-    if (disable_checksum) return 0;
+int put_siphtag(char *s, int &len) {
     assert(len >= 0);
-    // if(len<0) return -1;
-    u32_t crc32 = (u32_t)crc32_fast(s, len);
-    write_u32(s + len, crc32);
-    len += sizeof(u32_t);
-
+    uint8_t tag[8];
+    auth_tag(DOMAIN_DATA, (const uint8_t *)s, (size_t)len, tag);
+    memcpy(s + len, tag, sizeof(tag));
+    len += (int)sizeof(tag);
     return 0;
 }
 
 int do_cook(char *data, int &len) {
-    put_crc32(data, len);
+    put_siphtag(data, len);
     if (!disable_obscure) do_obscure(data, len);
     if (!disable_xor) encrypt_0(data, len, key_string);
     return 0;
@@ -349,21 +314,20 @@ int de_cook(char *s, int &len) {
             return ret;
         }
     }
-    int ret = rm_crc32(s, len);
+    int ret = rm_siphtag(s, len);
     if (ret != 0) {
-        mylog(log_debug, "rm_crc32 fail\n");
+        mylog(log_debug, "siphash tag check failed\n");
         return ret;
     }
     return 0;
 }
-int rm_crc32(char *s, int &len) {
-    if (disable_checksum) return 0;
-    assert(len >= 0);
-    len -= sizeof(u32_t);
-    if (len < 0) return -1;
-    u32_t crc32_in = read_u32(s + len);
-    u32_t crc32 = (u32_t)crc32_fast(s, len);
-    if (crc32 != crc32_in) return -1;
+int rm_siphtag(char *s, int &len) {
+    if (len < (int)sizeof(uint64_t)) return -1;
+    if (!auth_verify(DOMAIN_DATA, (const uint8_t *)s, (size_t)(len - (int)sizeof(uint64_t)),
+                     (const uint8_t *)(s + len - (int)sizeof(uint64_t)))) {
+        return -1;
+    }
+    len -= (int)sizeof(uint64_t);
     return 0;
 }
 /*

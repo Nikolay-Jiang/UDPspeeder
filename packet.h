@@ -44,8 +44,8 @@ int send_fd(int fd, char *buf, int len, int flags);
 
 int put_conv(u32_t conv, const char *input, int len_in, char *&output, int &len_out);
 int get_conv(u32_t &conv, const char *input, int len_in, char *&output, int &len_out);
-int put_crc32(char *s, int &len);
-int rm_crc32(char *s, int &len);
+int put_siphtag(char *s, int &len);
+int rm_siphtag(char *s, int &len);
 int do_cook(char *data, int &len);
 int de_cook(char *s, int &len);
 #endif /* PACKET_H_ */

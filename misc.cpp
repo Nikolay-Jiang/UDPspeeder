@@ -777,8 +777,11 @@ void process_arg(int argc, char *argv[]) {
                     mylog(log_info, "xor disabled\n");
                     disable_xor = 1;
                 } else if (strcmp(long_options[option_index].name, "disable-checksum") == 0) {
-                    disable_checksum = 1;
-                    mylog(log_warn, "checksum disabled\n");
+                    static bool disable_checksum_warned = false;
+                    if (!disable_checksum_warned) {
+                        disable_checksum_warned = true;
+                        mylog(log_warn, "--disable-checksum is deprecated and ignored; packets are always authenticated\n");
+                    }
                 } else if (strcmp(long_options[option_index].name, "fix-latency") == 0) {
                     mylog(log_info, "fix-latency enabled\n");
                     fix_latency = 1;

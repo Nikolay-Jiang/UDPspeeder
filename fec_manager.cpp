@@ -28,7 +28,7 @@ const int encode_fast_send = 1;
 const int decode_fast_send = 1;
 
 int short_packet_optimize = 1;
-int header_overhead = 40;
+int header_overhead = 44;
 
 u32_t fec_buff_num = 2000;  // how many packet can fec_decode_manager hold. shouldnt be very large,or it will cost huge memory
 

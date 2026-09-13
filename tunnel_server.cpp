@@ -146,7 +146,7 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
     if (!init) {
         for (int i = 0; i < IO_BATCH_MAX; i++) {
             batch_iov[i].iov_base = batch_bufs[i];
-            batch_iov[i].iov_len = max_data_len + 1;
+            batch_iov[i].iov_len = buf_len;
             memset(&batch_msgs[i], 0, sizeof(batch_msgs[i]));
             batch_msgs[i].msg_hdr.msg_iov = &batch_iov[i];
             batch_msgs[i].msg_hdr.msg_iovlen = 1;
@@ -176,8 +176,8 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
         int data_len = (int)batch_msgs[p].msg_len;
         char *data = batch_bufs[p];
 
-        if (data_len == max_data_len + 1) {
-            mylog(log_warn, "huge packet, data_len > %d, packet truncated, dropped\n", max_data_len);
+        if (data_len == buf_len) {
+            mylog(log_warn, "huge packet, data_len >= %d, packet truncated, dropped\n", buf_len);
             continue;
         }
 

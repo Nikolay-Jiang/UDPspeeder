@@ -52,7 +52,7 @@ static void print_help() {
     printf("                                          example: \"-f 1:3,2:4,10:6,20:10\". check repo for details\n");
     printf("    --random-drop         <number>        simulate packet loss, unit: 0.01%%. default value: 0.\n");
     printf("    --disable-obscure     <number>        disable obscure, to save a bit bandwidth and cpu\n");
-    printf("    --disable-checksum    <number>        disable checksum to save a bit bandwdith and cpu\n");
+    printf("    --disable-checksum    <number>        deprecated and ignored; packet authentication is always on\n");
     // printf("    --disable-xor         <number>        disable xor\n");
 
     printf("developer options:\n");
