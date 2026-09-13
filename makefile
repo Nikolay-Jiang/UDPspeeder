@@ -42,12 +42,30 @@ release: ${TARGETS}
 	cp git_version.h version.txt
 	tar -zcvf ${TAR}
 
-test: all
+test: all test-selftest
 	bash tests/smoke.sh ./${NAME}
+
+test-selftest: all
+	./${NAME} --test-selftest
+
+test-mode: all
+	bash tests/smoke_test_mode.sh ./${NAME}
+
+test-port-range: all
+	bash tests/smoke_port_range.sh ./${NAME}
+
+# Sanitizer build. Dynamic link only: no -static here (unlike `all`), because
+# ASan/UBSan cannot be combined with a fully static libc on this target.
+sanitize: git_version
+	rm -f ${NAME}-sanitize
+	${cc_local}   -o ${NAME}-sanitize -I. ${SOURCES} ${FLAGS} -lrt -ggdb -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+	./${NAME}-sanitize --test-selftest
+	bash tests/smoke.sh ./${NAME}-sanitize
 
 clean:
 	rm -f ${TAR}
 	rm -f ${NAME}
+	rm -f ${NAME}-sanitize
 	rm -f git_version.h
 
 git_version:

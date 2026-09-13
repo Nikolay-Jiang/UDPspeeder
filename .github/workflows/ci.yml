@@ -30,6 +30,10 @@ jobs:
             make ${{ matrix.target }}
           fi
 
+      - name: Evaluator selftest
+        run: make test-selftest
+        timeout-minutes: 2
+
       - name: Smoke test
         run: bash tests/smoke.sh ./speederv2
         timeout-minutes: 2
@@ -37,3 +41,23 @@ jobs:
       - name: IPv6 smoke test
         run: bash tests/smoke_ipv6.sh ./speederv2
         timeout-minutes: 3
+
+  extended-suites:
+    name: Extended suites (test-mode + port-range)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential libstdc++-12-dev
+
+      - name: Test-mode smoke test
+        run: make test-mode
+        timeout-minutes: 10
+
+      - name: Port-range smoke test
+        run: make test-port-range
+        timeout-minutes: 5
