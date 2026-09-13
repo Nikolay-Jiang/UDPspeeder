@@ -657,6 +657,8 @@ static int g_failures = 0;
         }                                            \
     } while (0)
 
+#include "tests/data_plane_selftest.h"
+
 // The prober loop (Task 9) and the responder loop (Task 8) both live in
 // test_mode_net.cpp; this file stays pure protocol/statistics logic plus the
 // selftest harness below.
@@ -666,6 +668,7 @@ int test_mode_selftest() {
     g_failures = 0;
 
     auth_selftest(g_checks, g_failures);
+    data_plane_selftest();
 
     // Harness self-check. Every later task's assertions are only as trustworthy
     // as TCHECK's ability to actually FAIL, so exercise the failure path once
