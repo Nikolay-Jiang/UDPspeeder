@@ -51,7 +51,7 @@ DATA_LO=$(( BASE_PORT + 10 ))
 DATA_HI=$(( BASE_PORT + 13 ))
 TEST_PORT=$(( BASE_PORT + 20 ))
 OUT_PORT=$(( BASE_PORT + 21 ))
-KEY="smoke_ipv6_$$"
+KEY="0123456789abcdef0123456789abcdef"
 
 PIDS=()
 cleanup() {

@@ -6,6 +6,7 @@
  */
 
 #include "misc.h"
+#include "auth.h"
 #include "control_proto.h"
 #include "test_mode.h"
 
@@ -666,23 +667,17 @@ void process_arg(int argc, char *argv[]) {
         }
     }
 
-    mylog(log_info, "argc=%d ", argc);
-
-    for (i = 0; i < argc; i++) {
-        log_bare(log_info, "%s ", argv[i]);
-    }
-    log_bare(log_info, "\n");
-
     int no_l = 1, no_r = 1;
     while ((opt = getopt_long(argc, argv, "l:r:hcsk:j:f:p:n:i:q:", long_options, &option_index)) != -1) {
         // string opt_key;
         // opt_key+=opt;
         switch (opt) {
             case 'k':
-                sscanf(optarg, "%s\n", key_string);
-                mylog(log_debug, "key=%s\n", key_string);
-                if (strlen(key_string) == 0) {
-                    mylog(log_fatal, "key len=0??\n");
+                // Never echo optarg: it is the PSK.
+                if (!auth_key_set_hex(optarg)) {
+                    mylog(log_fatal,
+                          "-k,--key must be exactly 32 ASCII hex characters "
+                          "(128-bit PSK, upper or lower case)\n");
                     myexit(-1);
                 }
                 break;
@@ -1011,6 +1006,17 @@ void process_arg(int argc, char *argv[]) {
         program_mode = server_mode;
     }
 
+    // Every network mode authenticates its packets, so the PSK is required
+    // before anything binds a socket. --help, --unit-test and --test-selftest
+    // exit before this point and stay usable without a key.
+    if (!auth_key_is_set()) {
+        mylog(log_fatal,
+              "-k,--key is required and must be exactly 32 ASCII hex characters "
+              "(128-bit PSK shared by both sides); the key authenticates packets "
+              "but does NOT encrypt them\n");
+        myexit(-1);
+    }
+
     if (working_mode == tunnel_mode) {
         bool need_l = !(port_range_mode && program_mode == server_mode);
         bool need_r = !(port_range_mode && program_mode == client_mode);
@@ -1031,11 +1037,6 @@ void process_arg(int argc, char *argv[]) {
     }
 
     if (working_mode == test_working_mode) {
-        if (strlen(key_string) == 0) {
-            mylog(log_fatal, "--test-mode requires -k (mandatory: probes are MAC-authenticated "
-                             "to prevent this responder being used as a UDP reflector)\n");
-            myexit(-1);
-        }
         if (program_mode == client_mode && !remote_addr.is_vaild()) {
             mylog(log_fatal, "--test-mode client requires -r <responder_ip:port>\n");
             myexit(-1);

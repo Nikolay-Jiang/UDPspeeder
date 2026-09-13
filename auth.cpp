@@ -6,6 +6,8 @@
 
 uint8_t g_psk[16] = {};
 
+static bool g_key_set = false;
+
 static int hex_value(unsigned char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -13,8 +15,11 @@ static int hex_value(unsigned char c) {
     return -1;
 }
 
+bool auth_key_is_set(void) { return g_key_set; }
+
 void auth_key_set(const uint8_t key[16]) {
     memmove(g_psk, key, sizeof(g_psk));
+    g_key_set = true;
     // Include the terminating NUL in each 12-byte label. Extract SipHash's
     // conventional little-endian output bytes explicitly, not in host order.
     const uint64_t a = siphash24("UDPSPD-XOR-A", 12, g_psk);

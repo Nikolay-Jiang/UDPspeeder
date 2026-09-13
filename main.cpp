@@ -29,7 +29,9 @@ static void print_help() {
     printf("    ipv6 addresses use bracket form everywhere an address is accepted, e.g. -l\"[::]:4096\" -r\"[2001:db8::1]:4096\"\n");
     printf("\n");
     printf("common options, must be same on both sides:\n");
-    printf("    -k,--key              <string>        key for simple xor encryption. if not set, xor is disabled\n");
+    printf("    -k,--key              <32 hex>        pre-shared key: exactly 32 ascii hex characters, required in every\n");
+    printf("                                          network mode and identical on both sides. authenticates packets; it does\n");
+    printf("                                          NOT encrypt. peers without the same key are rejected.\n");
 
     printf("main options:\n");
     printf("    -f,--fec              x:y             forward error correction, send y redundant packets for every x packets\n");

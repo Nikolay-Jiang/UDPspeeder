@@ -44,7 +44,7 @@ fi
 # Random high port to avoid CI collisions with other suites/runs.
 BASE_PORT=$(( (RANDOM % 20000) + 34000 ))
 RESP_PORT=$BASE_PORT
-KEY="smoke_testmode_$$"
+KEY="fedcba9876543210fedcba9876543210"
 
 WORKDIR=$(mktemp -d)
 PIDS=()

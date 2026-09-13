@@ -46,7 +46,7 @@ sleep 0.2
     --control-port $CTRL_PORT \
     --data-port-range "${DATA_START}-${DATA_END}" \
     -r "127.0.0.1:${ECHO_PORT}" \
-    $FEC_PARAMS -k testpw \
+    $FEC_PARAMS -k 0123456789abcdef0123456789abcdef \
     --log-level 3 2>/dev/null &
 SERVER_PID=$!
 
@@ -57,7 +57,7 @@ sleep 0.5
     --port-range-mode \
     --control-host "127.0.0.1:${CTRL_PORT}" \
     -l "0.0.0.0:${CLIENT_PORT}" \
-    $FEC_PARAMS -k testpw \
+    $FEC_PARAMS -k 0123456789abcdef0123456789abcdef \
     --log-level 3 2>/dev/null &
 CLIENT_PID=$!
 

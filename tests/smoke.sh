@@ -29,7 +29,7 @@ ECHO_PORT=$(( BASE_PORT ))
 CLIENT_PORT=$(( BASE_PORT + 1 ))
 TUNNEL_PORT=$(( BASE_PORT + 2 ))
 
-KEY="smoketest_key_$$"
+KEY="00112233445566778899aabbccddeeff"
 
 PIDS=()
 
