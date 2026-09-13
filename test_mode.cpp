@@ -1,4 +1,5 @@
 #include "test_mode.h"
+#include "auth.h"
 #include "log.h"
 #include "packet.h"  // key_string
 #include "siphash.h"
@@ -672,6 +673,8 @@ static int g_failures = 0;
 int test_mode_selftest() {
     g_checks = 0;
     g_failures = 0;
+
+    auth_selftest(g_checks, g_failures);
 
     // Harness self-check. Every later task's assertions are only as trustworthy
     // as TCHECK's ability to actually FAIL, so exercise the failure path once
