@@ -7,7 +7,7 @@ static ctrl_state_t g_ctrl_state = CTRL_IDLE;
 static int g_ctrl_fd = -1;
 static address_t::storage_t g_ctrl_server_stor;
 static socklen_t g_ctrl_server_len = 0;
-static int g_hello_miss = 0;     // consecutive heartbeat misses (reused for hello retries)
+static int g_hello_retry_sec = 1;  // capped exponential HELLO retry interval
 static int g_hb_miss = 0;
 
 static uint8_t g_session_id[16];  // random, set on first HELLO
@@ -315,16 +315,21 @@ static void ctrl_send_heartbeat() {
     mylog(log_debug, "ctrl: sent HEARTBEAT\n");
 }
 
-// ev_timer callback: periodic hello retry / heartbeat
+// ev_timer callback: single-shot hello retry / periodic heartbeat
 static void ctrl_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents) {
     assert(!(revents & EV_ERROR));
-    (void)loop;
 
     ctrl_replay_expire(get_current_time());
 
     if (g_ctrl_state == CTRL_HANDSHAKING) {
         ctrl_send_hello();
-        // Cap retry interval at hello_retry_max_sec via doubling in the caller
+        // Double without overflowing, including when the configured cap is INT_MAX.
+        g_hello_retry_sec = g_hello_retry_sec > hello_retry_max_sec / 2
+                                ? hello_retry_max_sec : g_hello_retry_sec * 2;
+        ev_timer_stop(loop, watcher);
+        ev_timer_set(watcher, (double)g_hello_retry_sec, 0.0);
+        ev_timer_start(loop, watcher);
+        mylog(log_debug, "ctrl: next HELLO retry in %d seconds\n", g_hello_retry_sec);
     } else if (g_ctrl_state == CTRL_RUNNING) {
         ctrl_send_heartbeat();
         g_hb_miss++;
@@ -334,8 +339,9 @@ static void ctrl_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int re
             g_hb_miss = 0;
             port_range_mgr.ready = false;
             // Reset timer to 1s retry
+            g_hello_retry_sec = 1;
             ev_timer_stop(loop, watcher);
-            ev_timer_set(watcher, 1.0, 1.0);
+            ev_timer_set(watcher, 1.0, 0.0);
             ev_timer_start(loop, watcher);
             ctrl_send_hello();
         }
@@ -343,6 +349,10 @@ static void ctrl_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int re
         g_ctrl_state = CTRL_HANDSHAKING;
         g_hb_miss = 0;
         port_range_mgr.ready = false;
+        g_hello_retry_sec = 1;
+        ev_timer_stop(loop, watcher);
+        ev_timer_set(watcher, 1.0, 0.0);
+        ev_timer_start(loop, watcher);
         ctrl_send_hello();
     }
 }
@@ -366,6 +376,19 @@ static void ctrl_remote_cb(struct ev_loop *loop, struct ev_io *watcher, int reve
     if (msg_type < 0) return;
 
     if (msg_type == CTRL_HELLO_ACK || msg_type == CTRL_HEARTBEAT_ACK) {
+        if (msg_type == CTRL_HELLO_ACK && payload_len < (int)sizeof(ctrl_hello_ack_hdr_t)) return;
+        if (msg_type == CTRL_HEARTBEAT_ACK && payload_len < 16) return;
+        address_t src;
+        src.from_sockaddr((struct sockaddr *)&src_stor, src_len);
+        if (!(src == ctrl_addr) || memcmp(payload, g_session_id, 16) != 0) {
+            static my_time_t last_ack_drop_log = 0;
+            my_time_t now = get_current_time();
+            if (now - last_ack_drop_log > 1000) {  // rate-limit to 1/s
+                last_ack_drop_log = now;
+                mylog(log_debug, "ctrl: dropped ACK with unexpected source or session\n");
+            }
+            return;
+        }
         if (!ctrl_replay_accept(g_session_id, hdr.nonce, hdr.timestamp_ms)) return;
     }
 
@@ -384,6 +407,7 @@ static void ctrl_remote_cb(struct ev_loop *loop, struct ev_io *watcher, int reve
         port_range_mgr.set_from_ack(ports, n, base);
 
         g_ctrl_state = CTRL_RUNNING;
+        g_hello_retry_sec = 1;
         g_hb_miss = 0;
         mylog(log_info, "ctrl: HELLO_ACK received — %d data ports, port-range-mode active\n", n);
 
@@ -484,7 +508,8 @@ int tunnel_client_event_loop() {
 
         // Handshake timer (1s initial interval)
         ev_init(&ctrl_timer, ctrl_timer_cb);
-        ev_timer_set(&ctrl_timer, 0.0, 1.0);
+        g_hello_retry_sec = 1;
+        ev_timer_set(&ctrl_timer, 1.0, 0.0);
         ev_timer_start(loop, &ctrl_timer);
 
         g_ctrl_state = CTRL_HANDSHAKING;
