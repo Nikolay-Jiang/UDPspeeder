@@ -370,11 +370,9 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
     address_t::storage_t src_stor;
     socklen_t src_len = sizeof(src_stor);
 
-    int len = recvfrom(ctrl_fd, buf, sizeof(buf) - 1, 0,
+    int len = recvfrom(ctrl_fd, buf, sizeof(buf), MSG_TRUNC,
                        (struct sockaddr *)&src_stor, &src_len);
-    if (len <= 0) return;
-
-    ctrl_replay_expire(get_current_time());
+    if (len <= 0 || len > (int)sizeof(buf)) return;
 
     uint8_t *payload;
     int payload_len;
@@ -382,11 +380,21 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
     int msg_type = ctrl_decode(buf, len, &payload, &payload_len, &hdr);
     if (msg_type < 0) return;
 
+    // Validate the complete fixed-size request before touching replay state.
+    if (msg_type == CTRL_HELLO) {
+        if (payload_len != (int)sizeof(ctrl_hello_payload_t)) return;
+    } else if (msg_type == CTRL_HEARTBEAT || msg_type == CTRL_BYE) {
+        if (payload_len != (int)sizeof(ctrl_hb_payload_t)) return;
+    } else {
+        return;
+    }
+
+    ctrl_replay_expire(get_current_time());
+
     address_t src;
     src.from_sockaddr((struct sockaddr *)&src_stor, src_len);
 
     if (msg_type == CTRL_HELLO || msg_type == CTRL_HEARTBEAT || msg_type == CTRL_BYE) {
-        if (payload_len < 16) return;
         if (!ctrl_replay_accept(payload, hdr.nonce, hdr.timestamp_ms)) {
             mylog(log_trace, "ctrl: replay rejected from %s\n", src.get_str());
             return;
@@ -394,7 +402,6 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
     }
 
     if (msg_type == CTRL_HELLO) {
-        if (payload_len < (int)sizeof(ctrl_hello_payload_t)) return;
         ctrl_hello_payload_t *hello = (ctrl_hello_payload_t *)payload;
 
         ctrl_hello_ack_hdr_t ack_hdr;
@@ -422,7 +429,6 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
               src.get_str(), port_range_mgr.count());
 
     } else if (msg_type == CTRL_HEARTBEAT) {
-        if (payload_len < (int)sizeof(ctrl_hb_payload_t)) return;
         ctrl_hb_payload_t *hb = (ctrl_hb_payload_t *)payload;
 
         ctrl_hb_payload_t hb_ack;
