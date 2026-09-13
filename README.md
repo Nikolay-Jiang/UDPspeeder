@@ -76,10 +76,10 @@ Assume your server ip is 44.55.66.77, you have a service listening on udp port 7
 
 ```bash
 # Run at server side:
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777  -f20:10 -k "passwd"
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777  -f20:10 -k 00112233445566778899aabbccddeeff
 
 # Run at client side
-./speederv2 -c -l0.0.0.0:3333  -r44.55.66.77:4096 -f20:10 -k "passwd"
+./speederv2 -c -l0.0.0.0:3333  -r44.55.66.77:4096 -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 Now connecting to UDP port 3333 at the client side is equivalent to connecting to port 7777 at the server side, and the connection has been boosted by UDPspeeder.
@@ -88,7 +88,12 @@ Now connecting to UDP port 3333 at the client side is equivalent to connecting t
 
 `-f20:10` means sending 10 redundant packets for every 20 original packets.
 
-`-k` enables simple XOR encryption
+`-k`/`--key` takes **exactly 32 ASCII hex characters** (16 bytes), for example
+`00112233445566778899aabbccddeeff`. It is **required in every network mode**
+and must be **identical on both ends**. The key **authenticates** packets: a
+peer with a different key, including an old build that used a passphrase, is
+rejected. It does **not encrypt**. The existing XOR and obscure layer is
+obfuscation only, so it changes the wire pattern but is never confidentiality.
 
 
 # Improves all traffic with OpenVPN + UDPspeeder
@@ -104,10 +109,10 @@ brackets, the same way you would in a URL:
 
 ```bash
 # server
-./speederv2 -s -l"[::]:4096" -r "[::1]:7777" -f20:10 -k "passwd"
+./speederv2 -s -l"[::]:4096" -r "[::1]:7777" -f20:10 -k 00112233445566778899aabbccddeeff
 
 # client
-./speederv2 -c -l"[::1]:3333" -r "[2001:db8::1]:4096" -f20:10 -k "passwd"
+./speederv2 -c -l"[::1]:3333" -r "[2001:db8::1]:4096" -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 Each socket takes its family from the argument that describes it, and the
@@ -119,10 +124,10 @@ path, with no second instance and no gateway in between:
 
 ```bash
 # server: v6 tunnel in, v4 application out
-./speederv2 -s -l"[::1]:4096" -r "127.0.0.1:7777" -f20:10 -k "passwd"
+./speederv2 -s -l"[::1]:4096" -r "127.0.0.1:7777" -f20:10 -k 00112233445566778899aabbccddeeff
 
 # client: v4 application in, v6 tunnel out
-./speederv2 -c -l"127.0.0.1:3333" -r "[::1]:4096" -f20:10 -k "passwd"
+./speederv2 -c -l"127.0.0.1:3333" -r "[::1]:4096" -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 The one pair that is **not** independent is the tunnel-facing pair — a
@@ -217,14 +222,14 @@ Enable port-range mode with 16 data ports:
     --control-port 14096 \
     --data-port-range 15000-15015 \
     -r 127.0.0.1:7777 \
-    -f20:10 -k "passwd"
+    -f20:10 -k 00112233445566778899aabbccddeeff
 
 # Client: dial control port 14096, get data port list, tunnel via those ports
 ./speederv2 -c \
     --port-range-mode \
     --control-host 44.55.66.77:14096 \
     -l 0.0.0.0:3333 \
-    -f20:10 -k "passwd"
+    -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 Client and server **must both specify `--port-range-mode`**; there is no automatic fallback. If only one side enables it, the handshake will fail.
@@ -241,13 +246,13 @@ You should see packets distributed across multiple destination ports in the rang
 
 #### Control-Plane Protocol
 
-The control plane uses an independent packet structure (version, msg_type, nonce, timestamp, payload, MAC). 
+The control plane uses an independent version-2 packet structure (version, msg_type, nonce, timestamp, payload, MAC).
 
-- **MAC algorithms:** `legacy` (default; uses existing `do_obscure` + `encrypt_0`) or `siphash` (SipHash-2-4 HMAC).
+- **MAC algorithm:** `siphash` only (SipHash-2-4 keyed by the shared PSK). The old `legacy` algorithm and the version-1 header were removed; `--control-mac legacy` is a fatal startup error.
 - **Messages:** `HELLO` (client → server), `HELLO_ACK` (server → client, carries session_id and port list), `HEARTBEAT` + `HEARTBEAT_ACK` (keepalive), `BYE` (teardown).
 - **Anti-replay:** Sliding window ±60s on timestamp, 1024-entry LRU nonce cache per session.
 
-Use `--control-mac {legacy|siphash}` to choose the MAC algorithm (both sides must match). Defaults to `legacy` for zero additional overhead.
+Use `--control-mac siphash` to select the MAC algorithm; it is the only accepted value and the default on both sides. Like the data plane, it authenticates the control packets (it is not encryption), and both sides must use the same PSK or the handshake is refused.
 
 ### Test Mode (Measure the Link, Recommend FEC Parameters)
 
@@ -285,10 +290,10 @@ inbound port.
 
 ```bash
 # responder (far end)
-./speederv2 -s --test-mode -l0.0.0.0:4096 -k "passwd"
+./speederv2 -s --test-mode -l0.0.0.0:4096 -k 00112233445566778899aabbccddeeff
 
 # prober (drives the test, prints the report)
-./speederv2 -c --test-mode -r<server_ip>:4096 -k "passwd" \
+./speederv2 -c --test-mode -r<server_ip>:4096 -k 00112233445566778899aabbccddeeff \
     --test-duration 30 --test-pps 200 --test-pkt-size 1200 --test-app-mbps 5
 ```
 
@@ -423,7 +428,7 @@ usage:
     run as server: ./this_program -s -l server_listen_ip:server_port -r remote_ip:remote_port  [options]
 
 common options, must be same on both sides:
-    -k,--key              <string>        key for simple xor encryption. if not set, xor is disabled
+    -k,--key              <32 hex>        exactly 32 ascii hex chars, required on both sides; authenticates, never encrypts
 main options:
     -f,--fec              x:y             forward error correction, send y redundant packets for every x packets
     --timeout             <number>        how long could a packet be held in queue before doing fec, unit: ms, default: 8ms

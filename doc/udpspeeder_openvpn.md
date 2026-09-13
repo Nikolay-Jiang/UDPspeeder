@@ -6,14 +6,19 @@
 
 #### run at server side
 ```
-./speederv2 -s -l0.0.0.0:8855 -r 127.0.0.1:7777 -f20:10
+./speederv2 -s -l0.0.0.0:8855 -r 127.0.0.1:7777 -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 #### run at client side
 assume server ip is 45.66.77.88
 ```
-./speederv2 -c -l0.0.0.0:3333 -r 45.66.77.88:8855 -f20:10
+./speederv2 -c -l0.0.0.0:3333 -r 45.66.77.88:8855 -f20:10 -k 00112233445566778899aabbccddeeff
 ```
+
+`-k`/`--key` must be **exactly 32 ASCII hex characters** and **identical on both
+sides**. The key authenticates the tunnel; it does not encrypt, and a peer with a
+different key (including an old passphrase) is rejected. Replace the example key
+above with your own 32-hex value before use.
 
 # openvpn config
 

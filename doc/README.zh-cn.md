@@ -70,10 +70,10 @@ https://github.com/wangyu-/UDPspeeder/releases
 假设你有一个server，ip为44.55.66.77，有一个服务监听在udp 7777端口。 假设你需要加速本地到44.55.66.77:7777的流量。
 ```
 在server端运行:
-./speederv2 -s -l0.0.0.0:4096 -r127.0.0.1:7777  -f20:10 -k "passwd" --mode 0
+./speederv2 -s -l0.0.0.0:4096 -r127.0.0.1:7777  -f20:10 -k 00112233445566778899aabbccddeeff --mode 0
 
 在client端运行:
-./speederv2 -c -l0.0.0.0:3333 -r44.55.66.77:4096 -f20:10 -k "passwd" --mode 0
+./speederv2 -c -l0.0.0.0:3333 -r44.55.66.77:4096 -f20:10 -k 00112233445566778899aabbccddeeff --mode 0
 ```
 
 现在client和server之间建立起了tunnel。想要连接44.55.66.77:7777，只需要连接 127.0.0.1:3333。来回的所有的udp流量会被加速。
@@ -82,7 +82,7 @@ https://github.com/wangyu-/UDPspeeder/releases
 
 `-f20:10`表示对每20个原始数据发送10个冗余包。`-f20:10` 和`-f 20:10`都是可以的，空格可以省略，对于所有的单字节option都是如此。对于双字节option，例如后面会提到的`--mode 0`，空格不可以省略。
 
-`-k` 指定一个字符串，开启简单的异或加密
+`-k`/`--key` 需要正好32个ASCII十六进制字符(16字节)，例如`00112233445566778899aabbccddeeff`。所有网络模式都必须提供该密钥，且两端必须完全一致。密钥用于认证数据包：使用不同密钥的对端(包括使用旧口令的旧版本)会被拒绝。密钥不加密数据，原有的异或和混淆只改变协议特征，并不提供机密性。
 
 推荐使用`--mode 0`选项，否则你可能需要考虑MTU问题。
 
@@ -109,7 +109,7 @@ usage:
     run as server: ./this_program -s -l server_listen_ip:server_port -r remote_ip:remote_port  [options]
 
 common options, must be same on both sides:
-    -k,--key              <string>        key for simple xor encryption. if not set, xor is disabled
+    -k,--key              <32 hex>        正好32个ASCII十六进制字符，两端必须一致；用于认证，不加密
 main options:
     -f,--fec              x:y             forward error correction, send y redundant packets for every x packets
     --timeout             <number>        how long could a packet be held in queue before doing fec, unit: ms, default: 8ms
@@ -199,7 +199,7 @@ echo mode 0 > fifo.file
 ### 以下设置两端必须相同。 
 
 ##### `-k`选项
-指定一个字符串，server/client间所有收发的包都会被异或，改变协议特征，防止UDPspeeder的协议被运营商针对。
+指定一个正好32个ASCII十六进制字符(16字节)的预共享密钥，server/client两端必须完全一致。该密钥用于认证双方收发的每个包，使用不同密钥的对端会被拒绝。它不加密数据；原有的异或只是混淆，用于改变协议特征，防止UDPspeeder的协议被运营商针对，并不提供机密性。
 
 ##### `--disable-obscure`
 UDPspeeder默认情况下会对每个发出的数据包随机填充和异或一些字节(4~32字节)，这样通过抓包难以发现你发了冗余数据，防止VPS被封。这个功能只是为了小心谨慎，即使你关掉这个功能，基本上也没问题，关掉可以省一些带宽和CPU。`--disable-obscure`可以关掉这个功能。

@@ -80,7 +80,7 @@ static void print_help() {
     printf("    --control-port        <port>          (server) fixed control/handshake port.\n");
     printf("    --data-port-range     a-b             (server) inclusive range of data ports, 1..256 ports.\n");
     printf("    --control-host        ip:port         (client) server's control address to handshake with.\n");
-    printf("    --control-mac         legacy|siphash   control-plane mac. must match on both sides. default: legacy.\n");
+    printf("    --control-mac         siphash         control-plane mac. sipHash-2-4 only; legacy is a fatal error.\n");
     printf("    --nat-keepalive       <sec>           (server) nat endpoint keepalive, default: 30.\n");
     printf("    --hello-retry-max     <sec>           (client) max handshake retry backoff, default: 30.\n");
     printf("    --heartbeat-interval  <sec>           control-plane heartbeat interval, default: 5.\n");
