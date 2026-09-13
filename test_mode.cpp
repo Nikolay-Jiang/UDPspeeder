@@ -1,26 +1,18 @@
 #include "test_mode.h"
 #include "auth.h"
 #include "log.h"
-#include "packet.h"  // key_string
-#include "siphash.h"
 #include <algorithm>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 // ---------------- wire protocol codec ----------------
-static void test_mac_key(uint8_t k[16]) {
-    memset(k, 0, 16);
-    int klen = (int)strlen(key_string);
-    if (klen > 16) klen = 16;
-    memcpy(k, key_string, klen);
-}
-
+// The test plane is authenticated with the shared PSK under DOMAIN_TEST, the
+// same as every other plane. auth_tag serializes the 8-byte SipHash-2-4 tag
+// big-endian, so a peer must hold byte-identical g_psk to be accepted; the
+// version byte and field offsets above the tag are unchanged.
 static void test_mac_compute(const char *body, int body_len, char out[TEST_MAC_LEN]) {
-    uint8_t k[16];
-    test_mac_key(k);
-    uint64_t h = siphash24(body, (size_t)body_len, k);
-    memcpy(out, &h, TEST_MAC_LEN);
+    auth_tag(DOMAIN_TEST, (const uint8_t *)body, (size_t)body_len, (uint8_t *)out);
 }
 
 int test_encode(int msg_type, int phase, uint32_t seq,
@@ -56,9 +48,8 @@ int test_decode(char *buf, int len, test_hdr_t *hdr_out,
     if (len < TEST_HDR_LEN + TEST_MAC_LEN || len > TEST_BUF_MAX) return -1;
     int body_len = len - TEST_MAC_LEN;
 
-    char expected[TEST_MAC_LEN];
-    test_mac_compute(buf, body_len, expected);
-    if (memcmp(expected, buf + body_len, TEST_MAC_LEN) != 0) return -1;
+    if (!auth_verify(DOMAIN_TEST, (const uint8_t *)buf, (size_t)body_len,
+                     (const uint8_t *)(buf + body_len))) return -1;
 
     if ((uint8_t)buf[0] != 1) return -1;   // version
     if ((uint8_t)buf[3] != 0) return -1;   // reserved
@@ -695,7 +686,12 @@ int test_mode_selftest() {
 
     // ---- codec ----
     {
-        strcpy(key_string, "selftest_key");
+        // auth_selftest restores whatever key was live before it ran, so the
+        // codec must install its own key here -- before the first encode -- or
+        // a vector key left behind by the auth checks could leak into these.
+        uint8_t codec_key[16];
+        for (int i = 0; i < 16; i++) codec_key[i] = (uint8_t)(0x40 + i);
+        auth_key_set(codec_key);
         char buf[TEST_BUF_MAX];
         const char pl[4] = {'a', 'b', 'c', 'd'};
 
@@ -735,9 +731,12 @@ int test_mode_selftest() {
 
         // MAC must reject a wrong key
         int n3 = test_encode(TEST_HELLO, 0, 0, pl, 4, buf, sizeof(buf), 0);
-        strcpy(key_string, "different_key");
+        uint8_t wrong_key[16];
+        memcpy(wrong_key, codec_key, sizeof(wrong_key));
+        wrong_key[0] ^= 1;
+        auth_key_set(wrong_key);
         TCHECK(test_decode(buf, n3, &h, &p, &plen) == -1, "wrong key must fail MAC");
-        strcpy(key_string, "selftest_key");
+        auth_key_set(codec_key);
 
         // too-short packet must be rejected, not read out of bounds
         TCHECK(test_decode(buf, TEST_HDR_LEN + TEST_MAC_LEN - 1, &h, &p, &plen) == -1,
