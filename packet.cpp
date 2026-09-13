@@ -18,6 +18,7 @@ u64_t packet_send_count = 0;
 u64_t dup_packet_send_count = 0;
 u64_t packet_recv_count = 0;
 u64_t dup_packet_recv_count = 0;
+u64_t short_send_drop_count = 0;
 
 typedef u64_t anti_replay_seq_t;
 int disable_replay_filter = 0;
@@ -77,6 +78,7 @@ void my_send_flush() {
         }
         int sent = sendmmsg(fd, msgvec, count, 0);
         if (sent < 0) {
+            short_send_drop_count += count;
             static my_time_t last_err_log = 0;
             my_time_t now = get_current_time();
             if (now - last_err_log > 1000) {  // rate-limit to 1/s
@@ -84,6 +86,7 @@ void my_send_flush() {
                 mylog(log_warn, "sendmmsg(fd=%d,count=%d) failed: %s\n", fd, count, get_sock_error());
             }
         } else if (sent < count) {
+            short_send_drop_count += count - sent;
             static my_time_t last_short_log = 0;
             my_time_t now = get_current_time();
             if (now - last_short_log > 1000) {  // rate-limit to 1/s

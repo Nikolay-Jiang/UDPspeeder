@@ -18,6 +18,7 @@ extern u64_t packet_send_count;
 extern u64_t dup_packet_send_count;
 extern u64_t packet_recv_count;
 extern u64_t dup_packet_recv_count;
+extern u64_t short_send_drop_count;
 extern char key_string[1000];
 extern int disable_replay_filter;
 extern int random_drop;

@@ -7,6 +7,7 @@
 
 #include "common.h"
 #include "log.h"
+#include "misc.h"
 
 #include <random>
 #include <cmath>
@@ -564,6 +565,7 @@ int set_buf_size(int fd, int socket_buf_size) {
 }
 
 void myexit(int a) {
+    delay_manager.log_stats();
     if (enable_log_color)
         printf("%s\n", RESET);
     // clear_iptables_rule();

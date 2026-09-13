@@ -103,22 +103,42 @@ struct my_timer_t
         }
 };*/
 
-// Fixed-size object pool for delay_manager packet buffers.
+// Object pool for delay_manager packet buffers.
+// The slot count is a runtime value so it can be sized from --delay-capacity;
+// it is allocated by delay_manager_t::set_capacity() before the event loop
+// starts (the pool is a global that is constructed before process_arg runs).
 // Eliminates per-packet malloc/free in the hot send path.
 struct packet_pool_t {
     static const int SLOT_SIZE = buf_len + 100;
-    static const int NUM_SLOTS = 800;
+    static const int DEFAULT_NUM_SLOTS = 800;
 
     char *mem;
+    int num_slots;
     vector<char *> free_slots;
 
     packet_pool_t() {
-        mem = new char[NUM_SLOTS * SLOT_SIZE];
-        free_slots.reserve(NUM_SLOTS);
-        for (int i = 0; i < NUM_SLOTS; i++)
-            free_slots.push_back(mem + i * SLOT_SIZE);
+        mem = 0;
+        num_slots = 0;
     }
     ~packet_pool_t() { delete[] mem; }
+
+    bool is_sized() const { return num_slots > 0; }
+    bool is_full() const { return free_slots.empty(); }
+
+    // Allocate/relocate the pool. Must not be called while slots are checked
+    // out; set_capacity() runs before the event loop, so that holds.
+    void resize(int slots) {
+        if (slots < 1) slots = 1;
+        if (slots == num_slots) return;
+        assert(free_slots.size() == (size_t)num_slots);
+        free_slots.clear();
+        delete[] mem;
+        mem = new char[slots * SLOT_SIZE];
+        num_slots = slots;
+        free_slots.reserve(slots);
+        for (int i = 0; i < slots; i++)
+            free_slots.push_back(mem + i * SLOT_SIZE);
+    }
 
     char *acquire() {
         if (!free_slots.empty()) {
@@ -136,8 +156,6 @@ struct packet_pool_t {
         else
             free(p);
     }
-
-    bool is_full() const { return free_slots.empty(); }
 };
 
 struct delay_data_t {
@@ -157,6 +175,10 @@ struct delay_manager_t {
     // int timer_fd;
     int capacity;
     packet_pool_t pool;
+    u64_t fallback_malloc;   // delayed packets that had to fall back to malloc
+    u64_t queue_high_water;  // max number of entries ever held in delay_mp
+    my_time_t last_capacity_warn;
+    my_time_t last_pool_warn;
     multimap<my_time_t, delay_data_t> delay_mp;  // unit us,1 us=0.001ms
     delay_manager_t();
     delay_manager_t(delay_manager_t &b) {
@@ -169,12 +191,14 @@ struct delay_manager_t {
     }
     int set_capacity(int a) {
         capacity = a;
+        pool.resize(a > 0 ? a : packet_pool_t::DEFAULT_NUM_SLOTS);
         return 0;
     }
     ~delay_manager_t();
     ev_timer &get_timer();
     int check();
     int add(my_time_t delay, const dest_t &dest, char *data, int len);
+    void log_stats();
 };
 
 #endif /* DELAY_MANAGER_H_ */

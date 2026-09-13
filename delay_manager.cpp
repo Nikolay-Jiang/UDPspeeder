@@ -14,6 +14,10 @@ int delay_data_t::handle() {
 
 delay_manager_t::delay_manager_t() {
     capacity = 0;
+    fallback_malloc = 0;
+    queue_high_water = 0;
+    last_capacity_warn = 0;
+    last_pool_warn = 0;
 
     // if ((timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK)) < 0)
     //{
@@ -44,7 +48,11 @@ int delay_manager_t::add(my_time_t delay, const dest_t &dest, char *data, int le
     delay_data.len = len;
 
     if (capacity != 0 && int(delay_mp.size()) >= capacity) {
-        mylog(log_warn, "max pending packet reached,ignored\n");
+        my_time_t now = get_current_time();
+        if (now - last_capacity_warn > 1000) {  // rate-limit to 1/s
+            last_capacity_warn = now;
+            mylog(log_warn, "max pending packet reached,ignored\n");
+        }
         return -1;
     }
     if (delay == 0) {
@@ -59,20 +67,34 @@ int delay_manager_t::add(my_time_t delay, const dest_t &dest, char *data, int le
     }
 
     delay_data_t tmp = delay_data;
-    if (pool.is_full())
-        mylog(log_warn, "packet pool exhausted, falling back to malloc\n");
-    tmp.pooled = !pool.is_full();
+    if (!pool.is_sized() || pool.is_full()) {
+        my_time_t now = get_current_time();
+        if (now - last_pool_warn > 1000) {  // rate-limit to 1/s
+            last_pool_warn = now;
+            if (!pool.is_sized())
+                mylog(log_warn, "packet pool not sized, falling back to malloc\n");
+            else
+                mylog(log_warn, "packet pool exhausted, falling back to malloc\n");
+        }
+        tmp.pooled = false;
+    } else {
+        tmp.pooled = true;
+    }
     tmp.data = pool.acquire();
     if (!tmp.data) {
         mylog(log_warn, "OOM in delay_manager_t::add()\n");
         return -1;
     }
+    if (!tmp.pooled) fallback_malloc++;
     memcpy(tmp.data, data, delay_data.len);
 
     my_time_t tmp_time = get_current_time_us();
     tmp_time += delay;
 
     delay_mp.insert(make_pair(tmp_time, tmp));
+
+    if ((u64_t)delay_mp.size() > queue_high_water)
+        queue_high_water = delay_mp.size();
 
     ////check();  check everytime when add, is it better ??
 
@@ -113,4 +135,13 @@ int delay_manager_t::check() {
         }
     }
     return 0;
+}
+
+void delay_manager_t::log_stats() {
+    if (!pool.is_sized()) return;  // set_capacity() never reached (early exit)
+    mylog(log_info, "delay: pool=%d fallback_malloc=%llu queue_high_water=%llu short_send_drop=%llu\n",
+          pool.num_slots,
+          (unsigned long long)fallback_malloc,
+          (unsigned long long)queue_high_water,
+          (unsigned long long)short_send_drop_count);
 }
