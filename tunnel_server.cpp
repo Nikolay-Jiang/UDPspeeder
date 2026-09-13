@@ -80,6 +80,7 @@ void data_from_remote_or_fec_timeout_or_conn_timer(conn_info_t &conn_info, fd64_
         }
 
         conn_info.stat.report_as_server(addr);
+        ctrl_replay_report(false);
         return;
     } else if (mode == is_from_remote) {
         if (!fd_manager.exist(fd64))  // fd64 has been closed
@@ -373,13 +374,24 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
                        (struct sockaddr *)&src_stor, &src_len);
     if (len <= 0) return;
 
+    ctrl_replay_expire(get_current_time());
+
     uint8_t *payload;
     int payload_len;
-    int msg_type = ctrl_decode(buf, len, &payload, &payload_len);
+    ctrl_hdr_t hdr;
+    int msg_type = ctrl_decode(buf, len, &payload, &payload_len, &hdr);
     if (msg_type < 0) return;
 
     address_t src;
     src.from_sockaddr((struct sockaddr *)&src_stor, src_len);
+
+    if (msg_type == CTRL_HELLO || msg_type == CTRL_HEARTBEAT || msg_type == CTRL_BYE) {
+        if (payload_len < 16) return;
+        if (!ctrl_replay_accept(payload, hdr.nonce, hdr.timestamp_ms)) {
+            mylog(log_trace, "ctrl: replay rejected from %s\n", src.get_str());
+            return;
+        }
+    }
 
     if (msg_type == CTRL_HELLO) {
         if (payload_len < (int)sizeof(ctrl_hello_payload_t)) return;
@@ -541,6 +553,7 @@ int tunnel_server_event_loop() {
     ev_run(loop, 0);
 
     mylog(log_warn, "ev_run returned\n");
+    ctrl_replay_report(true);
     myexit(0);
 
     /*

@@ -62,7 +62,6 @@ extern int keep_reconnect;
 // port-range mode
 extern int port_range_mode;
 extern int ctrl_port;
-extern int ctrl_mac_mode;
 extern int nat_keepalive_sec;
 extern int hello_retry_max_sec;
 extern int heartbeat_interval_sec;

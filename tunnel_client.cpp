@@ -269,6 +269,7 @@ static void conn_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int re
     mylog(log_trace, "events[idx].data.u64==(u64_t)conn_info.timer.get_timer_fd()\n");
 
     conn_info.stat.report_as_client();
+    ctrl_replay_report(false);
 
     if (debug_force_flush_fec) {
         int out_n;
@@ -319,6 +320,8 @@ static void ctrl_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int re
     assert(!(revents & EV_ERROR));
     (void)loop;
 
+    ctrl_replay_expire(get_current_time());
+
     if (g_ctrl_state == CTRL_HANDSHAKING) {
         ctrl_send_hello();
         // Cap retry interval at hello_retry_max_sec via doubling in the caller
@@ -358,8 +361,13 @@ static void ctrl_remote_cb(struct ev_loop *loop, struct ev_io *watcher, int reve
 
     uint8_t *payload;
     int payload_len;
-    int msg_type = ctrl_decode(buf, len, &payload, &payload_len);
+    ctrl_hdr_t hdr;
+    int msg_type = ctrl_decode(buf, len, &payload, &payload_len, &hdr);
     if (msg_type < 0) return;
+
+    if (msg_type == CTRL_HELLO_ACK || msg_type == CTRL_HEARTBEAT_ACK) {
+        if (!ctrl_replay_accept(g_session_id, hdr.nonce, hdr.timestamp_ms)) return;
+    }
 
     if (msg_type == CTRL_HELLO_ACK && g_ctrl_state == CTRL_HANDSHAKING) {
         int min_sz = (int)(sizeof(ctrl_hello_ack_hdr_t));
@@ -557,6 +565,7 @@ int tunnel_client_event_loop() {
     ev_run(loop, 0);
 
     mylog(log_warn, "ev_run returned\n");
+    ctrl_replay_report(true);
     myexit(0);
 
     /*

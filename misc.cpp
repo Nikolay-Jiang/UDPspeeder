@@ -66,7 +66,6 @@ int keep_reconnect = 0;
 // port-range mode globals
 int port_range_mode = 0;
 int ctrl_port = 0;
-int ctrl_mac_mode = 0;  // CTRL_MAC_LEGACY
 int nat_keepalive_sec = 30;
 int hello_retry_max_sec = 30;
 int heartbeat_interval_sec = 5;
@@ -822,12 +821,10 @@ void process_arg(int argc, char *argv[]) {
                         myexit(-1);
                     }
                 } else if (strcmp(long_options[option_index].name, "control-mac") == 0) {
-                    if (strcmp(optarg, "legacy") == 0) {
-                        ctrl_mac_mode = CTRL_MAC_LEGACY;
-                    } else if (strcmp(optarg, "siphash") == 0) {
-                        ctrl_mac_mode = CTRL_MAC_SIPHASH;
-                    } else {
-                        mylog(log_fatal, "--control-mac must be 'legacy' or 'siphash'\n");
+                    if (strcmp(optarg, "siphash") != 0) {
+                        mylog(log_fatal, "--control-mac legacy is no longer supported: the "
+                                         "control plane always uses SipHash; omit this "
+                                         "option or pass 'siphash'\n");
                         myexit(-1);
                     }
                 } else if (strcmp(long_options[option_index].name, "nat-keepalive") == 0) {
@@ -1116,11 +1113,8 @@ void process_arg(int argc, char *argv[]) {
             }
             mylog(log_info, "port-range-mode: control-host=%s\n", ctrl_addr.get_str());
         }
-        ctrl_nonce_init();
-        if (ctrl_mac_mode == CTRL_MAC_SIPHASH)
-            mylog(log_info, "control-mac: siphash\n");
-        else
-            mylog(log_info, "control-mac: legacy\n");
+        ctrl_replay_reset();
+        mylog(log_info, "control-mac: siphash\n");
     }
 
     // --out-addr pins the local end of this instance's outbound ('-r' side)
