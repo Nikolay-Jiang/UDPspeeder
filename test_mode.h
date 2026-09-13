@@ -315,5 +315,8 @@ int test_mode_prober_loop();
 int test_mode_responder_loop();
 int test_mode_selftest();  // 0 = all checks passed
 int test_mode_net_selftest();  // isolated codec/callback regression harness
+// Control-plane negative matrix (version/MAC/length/replay/timestamp/source/
+// session). Defined in tunnel_client.cpp; adds to the caller's check totals.
+int control_plane_selftest(int &checks, int &failures);
 
 #endif /* TEST_MODE_H_ */

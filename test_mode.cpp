@@ -1353,6 +1353,8 @@ int test_mode_selftest() {
         }
     }
 
+    control_plane_selftest(g_checks, g_failures);
+
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
     int net_failures = test_mode_net_selftest();
     return g_failures == 0 && net_failures == 0 ? 0 : 1;

@@ -642,3 +642,8 @@ int tunnel_client_event_loop() {
     }*/
     return 0;
 }
+
+// Control-plane negative matrix. Included here (not in test_mode.cpp) because
+// it drives this file's static ACK gate and client control state; only
+// --test-selftest ever calls control_plane_selftest().
+#include "tests/control_plane_selftest.h"
