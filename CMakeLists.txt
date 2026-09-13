@@ -1,6 +1,7 @@
 #note: experimental
 #      currently only used for generating `compile_commands.json` for clangd
 #      to build this project, it's suggested to use `makefile` instead
+#      `make sanitize` is the supported sanitizer route
 
 cmake_minimum_required(VERSION 3.7)
 project(speederv2)
@@ -14,6 +15,7 @@ set(SOURCE_FILES
         common.cpp
         lib/fec.cpp
         lib/rs.cpp
+        crc32/Crc32.cpp
         packet.cpp
         delay_manager.cpp
         fd_manager.cpp
@@ -23,6 +25,12 @@ set(SOURCE_FILES
         tunnel_client.cpp
         tunnel_server.cpp
         my_ev.cpp
+        siphash.cpp
+        auth.cpp
+        control_proto.cpp
+        port_range_manager.cpp
+        test_mode.cpp
+        test_mode_net.cpp
 )
 set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-unused-variable -Wno-unused-parameter -Wno-missing-field-initializers -O2 -g -fsanitize=address,undefined")
 
