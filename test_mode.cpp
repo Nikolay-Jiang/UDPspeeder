@@ -1354,5 +1354,6 @@ int test_mode_selftest() {
     }
 
     printf("test_mode selftest: %d checks, %d failures\n", g_checks, g_failures);
-    return g_failures == 0 ? 0 : 1;
+    int net_failures = test_mode_net_selftest();
+    return g_failures == 0 && net_failures == 0 ? 0 : 1;
 }

@@ -314,5 +314,6 @@ int test_display_width(const char *s);
 int test_mode_prober_loop();
 int test_mode_responder_loop();
 int test_mode_selftest();  // 0 = all checks passed
+int test_mode_net_selftest();  // isolated codec/callback regression harness
 
 #endif /* TEST_MODE_H_ */

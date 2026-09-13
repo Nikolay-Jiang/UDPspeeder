@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # smoke_test_mode.sh — end-to-end check for --test-mode
 #
-# Round 1: --test-selftest (pure-function regression, expects 0 failures)
+# Round 1: --test-selftest (pure-function regression, expects 0 failures).
+#          Also asserts the emitted parent-harness check count has not dropped
+#          below EXPECTED_SELFTEST_MIN, and that no -k is required.
+# Round 1a-1d: reverse-path negatives driven through the real responder
+#          callback in-process (wrong cookie, missing cookie, duplicate
+#          PHASE_BEGIN, idle expiry); each must be rejected or the suite fails.
 # Round 2: loopback probe with no injected loss   -> reported loss < 1%
 # Round 3: loopback probe with --random-drop 1000 (~10% injected) -> reported
 #          loss lands in a 5-16% band (injection is pseudo-random per run, so
@@ -24,6 +29,8 @@
 #          non-zero: rounds 4 and 6 only ever see a clean loopback, against
 #          which a systematically-understating downstream path would still
 #          look perfect.
+# Round 8: wrong-key prober against a keyed responder -> the responder rejects
+#          the MAC and the prober exits without a report (test-plane rekey).
 #
 # Timing note: the rate-scan phase is a fixed 10s x 3 sub-phases regardless of
 # --test-duration/--test-pps, so each prober run still pays ~36s minimum in
@@ -45,6 +52,14 @@ fi
 BASE_PORT=$(( (RANDOM % 20000) + 34000 ))
 RESP_PORT=$BASE_PORT
 KEY="fedcba9876543210fedcba9876543210"
+
+# Floor for the parent-harness check count emitted as
+# "test_mode selftest: N checks, F failures". Set by the exact procedure in the
+# plan (todo 15), run on a build where todos 1/6/13 have landed:
+#   N=$(./speederv2 --test-selftest 2>&1 | sed -n 's/.*selftest: \([0-9]*\) checks.*/\1/p')
+# A future change that silently deletes checks would otherwise keep passing.
+# When checks are added, raise this literal deliberately; never lower it.
+EXPECTED_SELFTEST_MIN=194
 
 WORKDIR=$(mktemp -d)
 PIDS=()
@@ -69,12 +84,69 @@ echo "  note   : rate-scan is a fixed 10s x 3 phases per prober run (~36s);"
 echo "           expect roughly ~2 minutes total for this script"
 echo
 
-echo "Round 1: --test-selftest"
-if ! "$BINARY" --test-selftest; then
-    echo "  FAIL: selftest reported failures"
+echo "Round 1: --test-selftest (no -k) + check-count floor"
+SELFTEST_OUT=$("$BINARY" --test-selftest 2>&1) || {
+    echo "  FAIL: selftest reported failures with no -k"
+    printf '%s\n' "$SELFTEST_OUT" | grep -E "FAIL|failures" | head -20 || true
+    exit 1
+}
+N=$(printf '%s\n' "$SELFTEST_OUT" | sed -n 's/.*selftest: \([0-9]*\) checks.*/\1/p')
+if [[ ! "$N" =~ ^[0-9]+$ ]]; then
+    echo "  FAIL: could not parse 'test_mode selftest: N checks' from selftest output"
     exit 1
 fi
-echo "  [selftest] passed"
+if (( N < EXPECTED_SELFTEST_MIN )); then
+    echo "  FAIL: selftest emitted ${N} checks, below the ${EXPECTED_SELFTEST_MIN}-check floor"
+    echo "        (a check was removed, or the harness stopped counting)"
+    exit 1
+fi
+echo "  [selftest] passed with no -k; ${N} checks >= floor ${EXPECTED_SELFTEST_MIN}"
+echo
+
+# Reverse-phase negatives. Each case drives the REAL responder_cb in-process
+# through the --test-selftest hook (UDPSPEEDER_SELFTEST_REVERSE), so no network
+# peer, root, or tc is needed and the network paths are untouched. The harness
+# asserts the production rejection path and prints a marker line; a case that is
+# not rejected prints nothing and exits non-zero here.
+echo "Round 1a: reverse negative - wrong cookie must be rejected"
+OUT_1A=$(UDPSPEEDER_SELFTEST_REVERSE=wrong-cookie "$BINARY" --test-selftest 2>&1) || {
+    echo "  FAIL: selftest failed while driving the wrong-cookie case"; exit 1; }
+printf '%s\n' "$OUT_1A" | grep -q "refusing reverse phase" || {
+    echo "  FAIL: wrong-cookie PHASE_BEGIN was not rejected"; exit 1; }
+if printf '%s\n' "$OUT_1A" | grep -q "trace-stats:"; then
+    echo "  FAIL: wrong-cookie case still produced a probe/trace line"; exit 1; fi
+echo "  [reverse-neg] wrong cookie rejected, no probe/trace line"
+
+echo "Round 1b: reverse negative - missing cookie must be rejected"
+OUT_1B=$(UDPSPEEDER_SELFTEST_REVERSE=missing-cookie "$BINARY" --test-selftest 2>&1) || {
+    echo "  FAIL: selftest failed while driving the missing-cookie case"; exit 1; }
+printf '%s\n' "$OUT_1B" | grep -q "refusing reverse phase" || {
+    echo "  FAIL: missing-cookie PHASE_BEGIN was not rejected"; exit 1; }
+if printf '%s\n' "$OUT_1B" | grep -q "trace-stats:"; then
+    echo "  FAIL: missing-cookie case still produced a probe/trace line"; exit 1; fi
+echo "  [reverse-neg] missing cookie rejected, no probe/trace line"
+
+echo "Round 1c: reverse negative - duplicate PHASE_BEGIN must re-ACK, not reset"
+OUT_1C=$(UDPSPEEDER_SELFTEST_REVERSE=duplicate "$BINARY" --test-selftest 2>&1) || {
+    echo "  FAIL: selftest failed while driving the duplicate-PHASE_BEGIN case"; exit 1; }
+printf '%s\n' "$OUT_1C" | grep -q "duplicate PHASE_BEGIN for open phase" || {
+    echo "  FAIL: duplicate PHASE_BEGIN did not take the re-ACK path"; exit 1; }
+TS_COUNT=$(printf '%s\n' "$OUT_1C" | grep -c "^trace-stats:" || true)
+TS_FIRST=$(printf '%s\n' "$OUT_1C" | grep -m1 "^trace-stats:" || true)
+TS_LAST=$(printf '%s\n' "$OUT_1C" | grep "^trace-stats:" | tail -n1 || true)
+if [[ "$TS_COUNT" -ne 2 || -z "$TS_FIRST" || "$TS_FIRST" != "$TS_LAST" ]]; then
+    echo "  FAIL: duplicate PHASE_BEGIN changed the trace (${TS_COUNT} stats line(s):"
+    echo "        first='${TS_FIRST}' last='${TS_LAST}')"
+    exit 1
+fi
+echo "  [reverse-neg] duplicate re-ACKed; trace-stats byte-identical (${TS_FIRST})"
+
+echo "Round 1d: reverse negative - idle expiry must drop the session"
+OUT_1D=$(UDPSPEEDER_SELFTEST_REVERSE=idle-expiry "$BINARY" --test-selftest 2>&1) || {
+    echo "  FAIL: selftest failed while driving the idle-expiry case"; exit 1; }
+printf '%s\n' "$OUT_1D" | grep -q "res.rc_expired" || {
+    echo "  FAIL: idle expiry did not fire (no res.rc_expired line)"; exit 1; }
+echo "  [reverse-neg] idle session expired; res.rc_expired emitted"
 echo
 
 start_responder() {
@@ -315,6 +387,40 @@ echo "  [down-drop] downstream loss = ${DOWN_LOSS7}%"
 awk -v l="$DOWN_LOSS7" 'BEGIN{ exit !(l > 5.0 && l < 16.0) }' \
     || { echo "  FAIL: injected ~10% downstream but reported ${DOWN_LOSS7}% (expected band 5-16%)"; exit 1; }
 echo "  [down-drop] ok"
+echo
+
+echo "Round 8: wrong-key peer is rejected (test-plane rekey)"
+# The prober's HELLO is MAC'd with its own -k. A responder holding a different
+# key must drop it silently and the prober must give up without a report. This
+# is the end-to-end proof that the test plane is keyed by the shared PSK, not
+# merely by "some key was supplied".
+WRONG_KEY="00112233445566778899aabbccddeeff"
+"$BINARY" -s --test-mode -l0.0.0.0:$RESP_PORT -k "$KEY" --log-level 4 --disable-color \
+    > "$WORKDIR/r8_resp.log" 2>&1 &
+RESP_PID=$!
+PIDS+=("$RESP_PID")
+sleep 1
+set +e
+timeout 60 "$BINARY" -c --test-mode -r127.0.0.1:$RESP_PORT -k "$WRONG_KEY" \
+    --test-duration 1 --test-pps 5 --test-no-reverse --disable-color \
+    > "$WORKDIR/r8_prober.log" 2>&1
+RK_RC=$?
+set -e
+kill "$RESP_PID" 2>/dev/null || true; wait "$RESP_PID" 2>/dev/null || true; RESP_PID=""
+
+if [[ "$RK_RC" -eq 0 || "$RK_RC" -eq 124 ]]; then
+    echo "  FAIL: wrong-key prober exit status ${RK_RC} (expected a failure, not success/timeout)"
+    exit 1
+fi
+if grep -q "UDPspeeder FEC 测试报告" "$WORKDIR/r8_prober.log"; then
+    echo "  FAIL: wrong-key prober produced a report"
+    exit 1
+fi
+if ! grep -q "mac/format check failed" "$WORKDIR/r8_resp.log"; then
+    echo "  FAIL: responder did not reject the wrong-key peer"
+    exit 1
+fi
+echo "  [wrong-key] prober rc=${RK_RC}, no report; responder logged mac/format check failed"
 echo
 
 echo "=== PASSED ==="

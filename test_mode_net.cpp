@@ -795,6 +795,8 @@ static void responder_timer_cb(struct ev_loop *loop, struct ev_timer *w, int rev
     }
 }
 
+#include "tests/test_mode_net_selftest.h"
+
 int test_mode_responder_loop() {
     struct ev_loop *loop = ev_default_loop(0);
     assert(loop != NULL);
