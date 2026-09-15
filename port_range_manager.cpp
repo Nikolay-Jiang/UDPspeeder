@@ -31,12 +31,26 @@ void port_range_manager_t::set_from_ack(const uint16_t *p, int n, const address_
         ports.push_back(p[i]);
     server_base_addr = base_addr;
     rr_counter = 0;
+    rotate_base = 0;
+    window_log_pending = true;
     ready = true;
+}
+
+void port_range_manager_t::rotate_step() {
+    if (ports.empty()) return;
+    rotate_base = (rotate_base + 1) % ports.size();
+    rr_counter = rotate_base;
+    window_log_pending = true;
 }
 
 address_t port_range_manager_t::next_dest() {
     address_t addr = server_base_addr;
     addr.set_port(ports[rr_counter]);
+    if (window_log_pending) {
+        window_log_pending = false;
+        mylog(log_info, "port-rotate: window base=%zu first_dest_port=%u ports=%d\n",
+              rotate_base, (unsigned)ports[rotate_base], (int)ports.size());
+    }
     if (++rr_counter >= ports.size()) rr_counter = 0;
     return addr;
 }

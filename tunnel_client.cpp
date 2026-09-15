@@ -1,5 +1,6 @@
 #include "tunnel.h"
 #include "control_proto.h"
+#include "crypto/crypto_cfg.h"
 
 // --- port-range-mode client state machine ---
 enum ctrl_state_t { CTRL_IDLE, CTRL_HANDSHAKING, CTRL_RUNNING, CTRL_LOST };
@@ -9,6 +10,8 @@ static address_t::storage_t g_ctrl_server_stor;
 static socklen_t g_ctrl_server_len = 0;
 static int g_hello_retry_sec = 1;  // capped exponential HELLO retry interval
 static int g_hb_miss = 0;
+
+static my_time_t g_rotate_next_ms = 0;  // next data-port rotation boundary (0 = unarmed)
 
 static uint8_t g_session_id[16];  // random, set on first HELLO
 
@@ -271,6 +274,21 @@ static void conn_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int re
     conn_info.stat.report_as_client();
     ctrl_replay_report(false);
 
+    // Rotate the data-port round-robin base within the HELLO_ACK-installed
+    // list. Index bookkeeping only: no socket is opened/closed and fd_idx is
+    // untouched. Boundaries are quantized to this 400ms tick.
+    if (port_range_mode && g_crypto_cfg.rotate_sec > 0 && port_range_mgr.is_ready()) {
+        my_time_t now_ms = get_current_time();
+        my_time_t rotate_ms = (my_time_t)g_crypto_cfg.rotate_sec * 1000;
+        if (g_rotate_next_ms == 0) {
+            g_rotate_next_ms = now_ms + rotate_ms;
+        } else if (now_ms >= g_rotate_next_ms) {
+            port_range_mgr.rotate_step();
+            g_rotate_next_ms += rotate_ms;
+            if (g_rotate_next_ms <= now_ms) g_rotate_next_ms = now_ms + rotate_ms;
+        }
+    }
+
     if (debug_force_flush_fec) {
         int out_n;
         char **out_arr;
@@ -405,6 +423,14 @@ static void ctrl_remote_cb(struct ev_loop *loop, struct ev_io *watcher, int reve
         // base addr = server's ctrl addr but we just need the IP
         address_t base = ctrl_addr;
         port_range_mgr.set_from_ack(ports, n, base);
+
+        if (g_crypto_cfg.rotate_sec > 0) {
+            g_rotate_next_ms = get_current_time() + (my_time_t)g_crypto_cfg.rotate_sec * 1000;
+            mylog(log_info, "port-range: data-port rotation every %d s over %d advertised ports\n",
+                  g_crypto_cfg.rotate_sec, n);
+        } else {
+            g_rotate_next_ms = 0;
+        }
 
         g_ctrl_state = CTRL_RUNNING;
         g_hello_retry_sec = 1;
