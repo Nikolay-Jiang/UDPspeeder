@@ -314,12 +314,20 @@ static void prepare_cb(struct ev_loop *loop, struct ev_prepare *watcher, int rev
 static void ctrl_send_hello() {
     ctrl_hello_payload_t hello;
     memcpy(hello.session_id, g_session_id, 16);
+    // v3 HELLO payload = struct + 2-byte capability, inside the MAC range.
+    char payload[sizeof(ctrl_hello_payload_t) + sizeof(ctrl_cap_t)];
+    memcpy(payload, &hello, sizeof(hello));
+    ctrl_cap_t cap;
+    cap.cipher     = (uint8_t)g_crypto_cfg.cipher;
+    cap.pad_bucket = (uint8_t)g_crypto_cfg.pad_bucket;
+    memcpy(payload + sizeof(hello), &cap, sizeof(cap));
     int out_len;
-    char *pkt = ctrl_encode(CTRL_HELLO, &hello, sizeof(hello), &out_len);
+    char *pkt = ctrl_encode(CTRL_HELLO, payload, sizeof(payload), &out_len);
     if (!pkt) return;
     sendto(g_ctrl_fd, pkt, out_len, 0,
            (struct sockaddr *)&g_ctrl_server_stor, g_ctrl_server_len);
-    mylog(log_debug, "ctrl: sent HELLO\n");
+    mylog(log_debug, "ctrl: sent HELLO (cipher=%d pad_bucket=%d)\n",
+          cap.cipher, cap.pad_bucket);
 }
 
 static void ctrl_send_heartbeat() {
@@ -416,9 +424,28 @@ static void ctrl_remote_cb(struct ev_loop *loop, struct ev_io *watcher, int reve
         ctrl_hello_ack_hdr_t *ack = (ctrl_hello_ack_hdr_t *)payload;
         int n = (int)ack->port_count;
         if (n < 1 || n > 256) return;
-        if (payload_len < min_sz + n * 2) return;
+        // v3 payload = ack_hdr + n*2 ports + 2-byte cap, all inside the MAC
+        // range; one shared length gates both the ports and the cap reads.
+        int expect = min_sz + n * 2 + (int)sizeof(ctrl_cap_t);
+        if (payload_len != expect) return;
 
         uint16_t *ports = (uint16_t *)(payload + sizeof(ctrl_hello_ack_hdr_t));
+        ctrl_cap_t srv_cap;
+        memcpy(&srv_cap, payload + sizeof(ctrl_hello_ack_hdr_t) + n * 2, sizeof(srv_cap));
+        if (srv_cap.cipher != (uint8_t)g_crypto_cfg.cipher ||
+            srv_cap.pad_bucket != (uint8_t)g_crypto_cfg.pad_bucket) {
+            static my_time_t last_cap_mismatch_log = 0;
+            my_time_t now = get_current_time();
+            if (now - last_cap_mismatch_log > 1000) {  // rate-limit to 1/s
+                last_cap_mismatch_log = now;
+                mylog(log_warn,
+                      "ctrl: server capability mismatch (server cipher=%d pad_bucket=%d, "
+                      "local cipher=%d pad_bucket=%d); refusing ports\n",
+                      srv_cap.cipher, srv_cap.pad_bucket,
+                      (int)g_crypto_cfg.cipher, (int)g_crypto_cfg.pad_bucket);
+            }
+            return;
+        }
 
         // base addr = server's ctrl addr but we just need the IP
         address_t base = ctrl_addr;

@@ -139,7 +139,7 @@ char *ctrl_encode(int msg_type, const void *payload, int payload_len, int *out_l
     int total = (int)CTRL_HDR_LEN + payload_len + CTRL_MAC_LEN;
 
     ctrl_hdr_t hdr;
-    hdr.version      = 2;
+    hdr.version      = CTRL_VERSION;
     hdr.msg_type     = (uint8_t)msg_type;
     hdr.reserved     = 0;
     hdr.nonce        = get_fake_random_number_64();
@@ -184,7 +184,7 @@ int ctrl_decode(char *buf, int len, uint8_t **payload_out, int *payload_len_out,
     ctrl_hdr_t hdr;
     memcpy(&hdr, buf, CTRL_HDR_LEN);
 
-    if (hdr.version != 2) {
+    if (hdr.version != CTRL_VERSION) {
         mylog(log_trace, "ctrl_decode: unknown version %d\n", hdr.version);
         return -1;
     }

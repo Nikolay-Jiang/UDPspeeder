@@ -13,10 +13,14 @@ enum ctrl_msg_type_t {
     CTRL_BYE           = 5,
 };
 
+// Control-plane protocol version. Version 3 carries the 2-byte cipher/pad
+// capability exchange in HELLO/HELLO_ACK; ctrl_decode accepts only this value.
+#define CTRL_VERSION 3
+
 // Fixed header (20 bytes) present in every control packet.
 #pragma pack(push, 1)
 struct ctrl_hdr_t {
-    uint8_t  version;       // = 2
+    uint8_t  version;       // = CTRL_VERSION
     uint8_t  msg_type;
     uint16_t reserved;      // must be 0
     uint64_t nonce;
@@ -34,6 +38,16 @@ struct ctrl_hdr_t {
 #pragma pack(push, 1)
 struct ctrl_hello_payload_t {
     uint8_t session_id[16];
+};
+
+// Negotiated capability (2 bytes, no padding), appended at the END of the
+// HELLO/HELLO_ACK payload and covered by the control MAC. These two bytes are
+// exactly the AEAD associated data the data plane binds (todos 5/6).
+//   cipher:     0 = none, 1 = xchacha20-ietf-poly1305 (crypto_cipher_id_t)
+//   pad_bucket: the literal --pad value in {0,16,32,64}
+struct ctrl_cap_t {
+    uint8_t cipher;
+    uint8_t pad_bucket;
 };
 
 // HELLO_ACK payload (variable-length: ports array)

@@ -7,6 +7,7 @@
 
 #include "tunnel.h"
 #include "control_proto.h"
+#include "crypto/crypto_cfg.h"
 #include <vector>
 
 // port-range-mode: server data fds indexed by fd_idx
@@ -382,7 +383,7 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
 
     // Validate the complete fixed-size request before touching replay state.
     if (msg_type == CTRL_HELLO) {
-        if (payload_len != (int)sizeof(ctrl_hello_payload_t)) return;
+        if (payload_len != (int)(sizeof(ctrl_hello_payload_t) + sizeof(ctrl_cap_t))) return;
     } else if (msg_type == CTRL_HEARTBEAT || msg_type == CTRL_BYE) {
         if (payload_len != (int)sizeof(ctrl_hb_payload_t)) return;
     } else {
@@ -403,6 +404,25 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
 
     if (msg_type == CTRL_HELLO) {
         ctrl_hello_payload_t *hello = (ctrl_hello_payload_t *)payload;
+        ctrl_cap_t cli_cap;
+        memcpy(&cli_cap, payload + sizeof(ctrl_hello_payload_t), sizeof(cli_cap));
+
+        // G5: cipher/pad are server-global; a HELLO that disagrees with this
+        // server's config is refused before any port is installed.
+        if (cli_cap.cipher != (uint8_t)g_crypto_cfg.cipher ||
+            cli_cap.pad_bucket != (uint8_t)g_crypto_cfg.pad_bucket) {
+            static my_time_t last_cap_mismatch_log = 0;
+            my_time_t now = get_current_time();
+            if (now - last_cap_mismatch_log > 1000) {  // rate-limit to 1/s
+                last_cap_mismatch_log = now;
+                mylog(log_warn,
+                      "ctrl: HELLO capability mismatch from %s (client cipher=%d pad_bucket=%d, "
+                      "server cipher=%d pad_bucket=%d); refusing HELLO\n",
+                      src.get_str(), cli_cap.cipher, cli_cap.pad_bucket,
+                      (int)g_crypto_cfg.cipher, (int)g_crypto_cfg.pad_bucket);
+            }
+            return;
+        }
 
         ctrl_hello_ack_hdr_t ack_hdr;
         memcpy(ack_hdr.session_id, hello->session_id, 16);
@@ -410,14 +430,20 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
         ack_hdr.heartbeat_interval_ms = (uint32_t)(heartbeat_interval_sec * 1000);
         ack_hdr.session_lifetime_ms   = 0;  // unused in v1
 
-        // Build payload: ack_hdr + ports array
-        static char ack_payload[sizeof(ctrl_hello_ack_hdr_t) + 256 * 2];
+        // Build payload: ack_hdr + ports array + echoed server capability
+        static char ack_payload[sizeof(ctrl_hello_ack_hdr_t) + 256 * 2 + sizeof(ctrl_cap_t)];
         memcpy(ack_payload, &ack_hdr, sizeof(ack_hdr));
         for (int i = 0; i < port_range_mgr.count(); i++) {
             uint16_t p = port_range_mgr.ports[i];
             memcpy(ack_payload + sizeof(ack_hdr) + i * 2, &p, 2);
         }
-        int ack_payload_len = (int)sizeof(ack_hdr) + port_range_mgr.count() * 2;
+        ctrl_cap_t ack_cap;
+        ack_cap.cipher     = (uint8_t)g_crypto_cfg.cipher;
+        ack_cap.pad_bucket = (uint8_t)g_crypto_cfg.pad_bucket;
+        memcpy(ack_payload + sizeof(ack_hdr) + port_range_mgr.count() * 2,
+               &ack_cap, sizeof(ack_cap));
+        int ack_payload_len = (int)sizeof(ack_hdr) + port_range_mgr.count() * 2 +
+                              (int)sizeof(ack_cap);
 
         int out_len;
         char *pkt = ctrl_encode(CTRL_HELLO_ACK, ack_payload, ack_payload_len, &out_len);

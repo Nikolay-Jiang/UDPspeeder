@@ -20,6 +20,7 @@
 
 #include "auth.h"
 #include "control_proto.h"
+#include "crypto/crypto_cfg.h"
 
 // Counts into the caller's running totals so the new checks appear on the
 // single "test_mode selftest: N checks" line and cannot hide behind a separate
@@ -33,13 +34,17 @@
         }                                                                      \
     } while (0)
 
-// Build a v2 HELLO_ACK with an explicit nonce so acceptance is deterministic:
+// Build a v3 HELLO_ACK with an explicit nonce so acceptance is deterministic:
 // ctrl_encode draws a random nonce, which would make the positive control
 // (and therefore the whole matrix) flaky if that draw ever hit 0.
+//
+// Payload layout matches the server: ack_hdr + port_count*2 ports + the 2-byte
+// capability the server echoes. The cap is emitted from the local config (zero
+// by default under --test-selftest), exactly as the real server does.
 static int control_build_hello_ack(char *out, const uint8_t session[16],
                                    uint16_t port, uint64_t nonce) {
     ctrl_hdr_t hdr = {};
-    hdr.version      = 2;
+    hdr.version      = 3;
     hdr.msg_type     = CTRL_HELLO_ACK;
     hdr.nonce        = nonce;
     hdr.timestamp_ms = get_current_time();
@@ -52,7 +57,12 @@ static int control_build_hello_ack(char *out, const uint8_t session[16],
     memcpy(out + CTRL_HDR_LEN, &ack, sizeof(ack));
     memcpy(out + CTRL_HDR_LEN + sizeof(ack), &port, 2);
 
-    int body = (int)(CTRL_HDR_LEN + sizeof(ack) + 2);
+    ctrl_cap_t cap = {};
+    cap.cipher     = (uint8_t)g_crypto_cfg.cipher;
+    cap.pad_bucket = (uint8_t)g_crypto_cfg.pad_bucket;
+    memcpy(out + CTRL_HDR_LEN + sizeof(ack) + 2, &cap, sizeof(cap));
+
+    int body = (int)(CTRL_HDR_LEN + sizeof(ack) + 2 + sizeof(cap));
     auth_tag(DOMAIN_CTRL, (const uint8_t *)out, (size_t)body,
              (uint8_t *)(out + body));
     return body + (int)CTRL_MAC_LEN;
@@ -77,24 +87,31 @@ static int control_bind_loopback(address_t &out, uint32_t ip_be) {
 static void control_protocol_checks(int &checks, int &failures) {
     uint8_t hello[sizeof(ctrl_hello_payload_t)];
     memset(hello, 0x33, sizeof(hello));
+    // v3 HELLO payload = struct + 2-byte capability, matching ctrl_send_hello.
+    uint8_t hello_payload[sizeof(ctrl_hello_payload_t) + sizeof(ctrl_cap_t)];
+    memcpy(hello_payload, hello, sizeof(hello));
+    ctrl_cap_t cap = {};
+    cap.cipher     = (uint8_t)g_crypto_cfg.cipher;
+    cap.pad_bucket = (uint8_t)g_crypto_cfg.pad_bucket;
+    memcpy(hello_payload + sizeof(hello), &cap, sizeof(cap));
 
-    // Positive control: a v2 HELLO round-trips, so the rejections below cannot
+    // Positive control: a v3 HELLO round-trips, so the rejections below cannot
     // be explained by an unusable key or a broken encoder.
     int wire_len = 0;
-    char *wire = ctrl_encode(CTRL_HELLO, hello, sizeof(hello), &wire_len);
+    char *wire = ctrl_encode(CTRL_HELLO, hello_payload, sizeof(hello_payload), &wire_len);
     CTRLCHECK(wire != NULL &&
-              wire_len == (int)(CTRL_HDR_LEN + sizeof(hello) + CTRL_MAC_LEN));
+              wire_len == (int)(CTRL_HDR_LEN + sizeof(hello_payload) + CTRL_MAC_LEN));
     uint8_t *payload = NULL;
     int payload_len = 0;
     ctrl_hdr_t hdr;
     CTRLCHECK(ctrl_decode(wire, wire_len, &payload, &payload_len, &hdr) == CTRL_HELLO);
-    CTRLCHECK(hdr.version == 2 && payload_len == (int)sizeof(hello) &&
-              memcmp(payload, hello, sizeof(hello)) == 0);
+    CTRLCHECK(hdr.version == 3 && payload_len == (int)(sizeof(ctrl_hello_payload_t) + sizeof(ctrl_cap_t)) &&
+              memcmp(payload, hello_payload, sizeof(hello_payload)) == 0);
 
-    // Case 1: only version 2 is accepted. The MAC is recomputed over each
+    // Case 1: only version 3 is accepted. The MAC is recomputed over each
     // forged header, so a rejection must come from the version gate.
-    for (int version = 0; version <= 3; version++) {
-        if (version == 2) continue;
+    for (int version = 0; version <= 5; version++) {
+        if (version == 3) continue;
         char pkt[CTRL_BUF_MAX];
         ctrl_hdr_t forged = {};
         forged.version      = (uint8_t)version;
@@ -215,7 +232,7 @@ static void control_client_checks(int &checks, int &failures) {
     watcher.data = &timer;  // ctrl_remote_cb uses watcher->data as the timer
 
     const uint16_t port = 25001;
-    char ack[CTRL_HDR_LEN + sizeof(ctrl_hello_ack_hdr_t) + 2 + CTRL_MAC_LEN];
+    char ack[CTRL_HDR_LEN + sizeof(ctrl_hello_ack_hdr_t) + 2 + 2 + CTRL_MAC_LEN];
     int ack_len = control_build_hello_ack(ack, g_session_id, port, 424242);
     auto deliver = [&](int fd, const char *packet, int len) {
         CTRLCHECK(sendto(fd, packet, len, 0, (sockaddr *)&client_addr.inner,
