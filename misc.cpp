@@ -221,6 +221,10 @@ int from_fec_to_normal(conn_info_t &conn_info, char *data, int len, int &out_n, 
             inner_stat.input_packet_size += len;
         }
 
+        // Interference detection (G9) is client-side only; the server would
+        // otherwise accumulate a window it never reads.
+        if (program_mode == client_mode) fec_loss_note_inbound_shard(data, len);
+
         conn_info.fec_decode_manager.input(data, len);
 
         // int n;char ** s_arr;int* len_arr;

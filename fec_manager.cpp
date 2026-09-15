@@ -35,6 +35,132 @@ int header_overhead_set = 0;
 
 u32_t fec_buff_num = 2000;  // how many packet can fec_decode_manager hold. shouldnt be very large,or it will cost huge memory
 
+namespace {
+
+const int fec_loss_bucket_ms = 500;
+const int fec_loss_buckets = 10;        // 10 * 500ms = the 5s window G9 asks for
+const int fec_loss_settle_buckets = 2;  // both sides enter the window 1s after the wire event
+const int fec_loss_max_gap = 65536;     // beyond this a seq jump is an encoder restart, not loss
+const my_time_t fec_loss_record_ms = 6000;  // keep a group record a little past the window
+
+struct fec_loss_bucket_t {
+    u64_t epoch;  // now_ms / fec_loss_bucket_ms + 1; 0 = empty
+    u64_t expected;
+    u64_t received;
+};
+
+struct fec_loss_window_t {
+    fec_loss_bucket_t bucket[fec_loss_buckets];
+    std::unordered_map<u32_t, my_time_t> seen_seq;
+    u32_t last_seq;
+    int last_group_size;
+    bool have_last;
+    my_time_t last_prune_ms;
+
+    fec_loss_window_t() { clear(); }
+
+    void clear() {
+        memset(bucket, 0, sizeof(bucket));
+        seen_seq.clear();
+        last_seq = 0;
+        last_group_size = 0;
+        have_last = false;
+        last_prune_ms = 0;
+    }
+
+    void add(my_time_t now_ms, int delay_buckets, u64_t expected, u64_t received) {
+        u64_t epoch = (u64_t)(now_ms / fec_loss_bucket_ms) + 1 + (u64_t)delay_buckets;
+        fec_loss_bucket_t &b = bucket[(int)(epoch % fec_loss_buckets)];
+        if (b.epoch != epoch) {
+            b.epoch = epoch;
+            b.expected = 0;
+            b.received = 0;
+        }
+        b.expected += expected;
+        b.received += received;
+    }
+
+    void prune(my_time_t now_ms) {
+        if (now_ms - last_prune_ms < fec_loss_record_ms) return;
+        last_prune_ms = now_ms;
+        for (auto it = seen_seq.begin(); it != seen_seq.end();) {
+            if (now_ms - it->second > fec_loss_record_ms) {
+                it = seen_seq.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // One authenticated inbound shard, counted at the wire: the decoder's
+    // late-shard anti-replay filter drops the redundant shards of an
+    // already-completed group, so counting accepted shards would report
+    // y/(x+y) loss for every healthy group.
+    void note_shard(u32_t seq, int group_size, my_time_t now_ms) {
+        prune(now_ms);
+        if (seen_seq.find(seq) == seen_seq.end()) {
+            seen_seq[seq] = now_ms;
+            if (!have_last) {
+                have_last = true;
+                last_seq = seq;
+                last_group_size = group_size;
+            } else {
+                int32_t gap = (int32_t)(seq - last_seq);
+                if (gap > 1 && gap <= fec_loss_max_gap) {
+                    add(now_ms, fec_loss_settle_buckets, (u64_t)(gap - 1) * (u64_t)last_group_size, 0);
+                    last_seq = seq;
+                    last_group_size = group_size;
+                } else if (gap > 0) {
+                    last_seq = seq;  // contiguous newer group
+                    last_group_size = group_size;
+                } else if (gap <= -fec_loss_max_gap) {
+                    // Peer encoder restart: a random seq jump is not loss, so
+                    // resync instead of booking absurd expected counts.
+                    last_seq = seq;
+                    last_group_size = group_size;
+                }
+            }
+            add(now_ms, fec_loss_settle_buckets, (u64_t)group_size, 0);
+        }
+        // Same delay as `expected`: equal edge alignment, so a group's shard
+        // run is fully counted before it can look lost, and a traffic stop
+        // cannot leave delayed expected shards behind with nothing received.
+        add(now_ms, fec_loss_settle_buckets, 0, 1);
+    }
+
+    void get(my_time_t now_ms, u64_t &expected, u64_t &received) {
+        expected = 0;
+        received = 0;
+        u64_t cur_epoch = (u64_t)(now_ms / fec_loss_bucket_ms) + 1;
+        for (int i = 0; i < fec_loss_buckets; i++) {
+            if (bucket[i].epoch == 0) continue;
+            if (bucket[i].epoch > cur_epoch) continue;                             // settle delay not elapsed
+            if (cur_epoch - bucket[i].epoch >= (u64_t)fec_loss_buckets) continue;  // aged out
+            expected += bucket[i].expected;
+            received += bucket[i].received;
+        }
+    }
+};
+
+fec_loss_window_t g_fec_loss_window;
+
+}  // namespace
+
+void fec_loss_note_inbound_shard(char *data, int len) {
+    const int header_len = (int)(sizeof(u32_t) + 4);
+    if (data == 0 || len < header_len) return;
+    int type = (unsigned char)data[sizeof(u32_t)];
+    if (type != 0) return;  // mode-1 data shards carry no x/y in the header
+    int data_num = (unsigned char)data[sizeof(u32_t) + 1];
+    int redundant_num = (unsigned char)data[sizeof(u32_t) + 2];
+    if (data_num <= 0 || redundant_num < 0) return;
+    g_fec_loss_window.note_shard(read_u32(data), data_num + redundant_num, get_current_time());
+}
+
+void fec_loss_window_get(u64_t &expected, u64_t &received) {
+    g_fec_loss_window.get(get_current_time(), expected, received);
+}
+
 blob_encode_t::blob_encode_t() {
     clear();
 }

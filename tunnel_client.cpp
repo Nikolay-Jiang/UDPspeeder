@@ -15,6 +15,95 @@ static my_time_t g_rotate_next_ms = 0;  // next data-port rotation boundary (0 =
 
 static uint8_t g_session_id[16];  // random, set on first HELLO
 
+// --- interference detection (G9) ---
+
+// Anti-flap floor between re-handshakes, in ms, for every trigger: an isolated
+// event inside the cooldown is ignored instead of stacking a handshake on top
+// of a live one.
+static const my_time_t rehandshake_min_interval_ms = 30 * 1000;
+static my_time_t g_last_rehandshake_ms = 0;
+
+// Live control timer (created in tunnel_client_event_loop). A trigger re-arms
+// it to 1s so the CTRL_LOST branch of ctrl_timer_cb starts the fresh handshake
+// immediately instead of waiting out the current heartbeat interval.
+static struct ev_timer *g_ctrl_timer = 0;
+
+const int fec_loss_min_expected_shards = 20;  // G9 window floor
+const double loss_trigger_ratio = 0.20;       // >20% loss / short-send share
+
+// short_send_drop_count and the outbound shard total are cumulative, so the
+// windowed ratio needs a baseline sample: 14 samples on the 400ms conn tick
+// span ~5.2s, i.e. the oldest entry is at least 5s old.
+const int short_send_window_samples = 14;
+struct short_send_sample_t {
+    my_time_t t_ms;
+    u64_t drops;
+    u64_t outbound_shards;
+};
+static short_send_sample_t g_short_send_samples[short_send_window_samples];
+static int g_short_send_sample_count = 0;
+
+static void short_send_window_reset() {
+    g_short_send_sample_count = 0;
+}
+
+static void short_send_window_note(my_time_t now_ms, u64_t drops, u64_t outbound_shards) {
+    if (g_short_send_sample_count < short_send_window_samples) {
+        short_send_sample_t &slot = g_short_send_samples[g_short_send_sample_count++];
+        slot.t_ms = now_ms;
+        slot.drops = drops;
+        slot.outbound_shards = outbound_shards;
+        return;
+    }
+    memmove(g_short_send_samples, g_short_send_samples + 1,
+            sizeof(short_send_sample_t) * (short_send_window_samples - 1));
+    short_send_sample_t &slot = g_short_send_samples[short_send_window_samples - 1];
+    slot.t_ms = now_ms;
+    slot.drops = drops;
+    slot.outbound_shards = outbound_shards;
+}
+
+// Short-send drop fraction over the last >=5s, or negative while the window is
+// not yet covered or no shard was sent in it.
+static double short_send_window_ratio(my_time_t now_ms, u64_t drops, u64_t outbound_shards) {
+    short_send_window_note(now_ms, drops, outbound_shards);
+    if (g_short_send_sample_count < short_send_window_samples) return -1.0;
+    const short_send_sample_t &base = g_short_send_samples[0];
+    if (now_ms - base.t_ms < 5000) return -1.0;
+    u64_t dropped = drops - base.drops;
+    if (dropped == 0) return 0.0;
+    u64_t sent_shards = outbound_shards - base.outbound_shards;
+    if (sent_shards == 0) return -1.0;
+    return (double)dropped / (double)sent_shards;
+}
+
+// Arm a re-handshake. CTRL_LOST is assigned here and consumed by ctrl_timer_cb,
+// which resets the hello backoff to 1s and sends a fresh HELLO; the data path
+// stops using the stale port list until the new HELLO_ACK installs one.
+static void ctrl_enter_lost(struct ev_loop *loop, const char *reason) {
+    if (g_ctrl_state != CTRL_RUNNING) return;
+
+    my_time_t now = get_current_time();
+    if (g_last_rehandshake_ms != 0 && now - g_last_rehandshake_ms < rehandshake_min_interval_ms) {
+        mylog(log_debug, "ctrl: %s inside re-handshake cooldown (%llu ms), not re-entering\n",
+              reason, (unsigned long long)(now - g_last_rehandshake_ms));
+        return;
+    }
+
+    mylog(log_warn, "ctrl: %s, re-handshaking\n", reason);
+    g_last_rehandshake_ms = now;
+    g_ctrl_state = CTRL_LOST;
+    g_hb_miss = 0;
+    port_range_mgr.ready = false;
+    short_send_window_reset();
+    g_hello_retry_sec = 1;
+    if (loop && g_ctrl_timer) {
+        ev_timer_stop(loop, g_ctrl_timer);
+        ev_timer_set(g_ctrl_timer, 1.0, 0.0);
+        ev_timer_start(loop, g_ctrl_timer);
+    }
+}
+
 void data_from_local_or_fec_timeout(conn_info_t &conn_info, int is_time_out) {
     fd64_t &remote_fd64 = conn_info.remote_fd64;
     int &local_listen_fd = conn_info.local_listen_fd;
@@ -289,6 +378,30 @@ static void conn_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int re
         }
     }
 
+    // Interference detection (G9). Port-range mode only (normal mode has no
+    // control handshake to redo) and only while RUNNING, so a handshake already
+    // in flight is never re-entered; the 30s floor lives in ctrl_enter_lost().
+    if (port_range_mode && g_ctrl_state == CTRL_RUNNING) {
+        my_time_t now = get_current_time();
+
+        // Sampled every tick so the window stays continuous even when this
+        // tick triggers on the FEC signal.
+        double short_ratio = short_send_window_ratio(
+            now, short_send_drop_count, conn_info.stat.normal_to_fec.output_packet_num);
+
+        u64_t expected = 0, received = 0;
+        fec_loss_window_get(expected, received);
+        if (expected >= (u64_t)fec_loss_min_expected_shards &&
+            received * 5 < expected * 4) {  // pre-recovery loss > 20%
+            mylog(log_debug, "ctrl: inbound FEC loss %llu/%llu shards over 5s\n",
+                  (unsigned long long)received, (unsigned long long)expected);
+            ctrl_enter_lost(loop, "sustained inbound FEC loss > 20% over 5s");
+        } else if (short_ratio > loss_trigger_ratio) {
+            mylog(log_debug, "ctrl: short-send drop ratio %.1f%% over 5s\n", short_ratio * 100.0);
+            ctrl_enter_lost(loop, "short-send drops > 20% over 5s");
+        }
+    }
+
     if (debug_force_flush_fec) {
         int out_n;
         char **out_arr;
@@ -360,18 +473,12 @@ static void ctrl_timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int re
         ctrl_send_heartbeat();
         g_hb_miss++;
         if (g_hb_miss >= heartbeat_loss_threshold) {
-            mylog(log_warn, "ctrl: %d heartbeats missed, re-handshaking\n", g_hb_miss);
-            g_ctrl_state = CTRL_HANDSHAKING;
-            g_hb_miss = 0;
-            port_range_mgr.ready = false;
-            // Reset timer to 1s retry
-            g_hello_retry_sec = 1;
-            ev_timer_stop(loop, watcher);
-            ev_timer_set(watcher, 1.0, 0.0);
-            ev_timer_start(loop, watcher);
-            ctrl_send_hello();
+            static char hb_reason[64];
+            snprintf(hb_reason, sizeof(hb_reason), "%d heartbeats missed", g_hb_miss);
+            ctrl_enter_lost(loop, hb_reason);
         }
     } else if (g_ctrl_state == CTRL_LOST) {
+        mylog(log_info, "ctrl: starting fresh handshake (hello backoff reset to 1s)\n");
         g_ctrl_state = CTRL_HANDSHAKING;
         g_hb_miss = 0;
         port_range_mgr.ready = false;
@@ -561,6 +668,7 @@ int tunnel_client_event_loop() {
 
         // Handshake timer (1s initial interval)
         ev_init(&ctrl_timer, ctrl_timer_cb);
+        g_ctrl_timer = &ctrl_timer;
         g_hello_retry_sec = 1;
         ev_timer_set(&ctrl_timer, 1.0, 0.0);
         ev_timer_start(loop, &ctrl_timer);

@@ -435,4 +435,14 @@ class fec_decode_manager_t : not_copy_able_t {
     int output(int &n, char **&s_arr, int *&len_arr);
 };
 
+// Interference detection (G9): pre-recovery inbound FEC shard-loss window.
+// Call once per authenticated inbound shard, at the wire (from_fec_to_normal):
+// the decoder rejects the late redundant shards of a completed group, so the
+// window counts every shard that arrived, against the group size x+y from the
+// FEC header, over 5s. Fully-lost groups are charged via `gap *
+// last_group_size` on group-seq gaps. Mode 1 is excluded: its data shards
+// carry data_num = redundant_num = 0, so x+y is not on the wire.
+void fec_loss_note_inbound_shard(char *data, int len);
+void fec_loss_window_get(u64_t &expected, u64_t &received);
+
 #endif /* FEC_MANAGER_H_ */
