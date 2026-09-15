@@ -8,6 +8,7 @@
 #include "misc.h"
 #include "auth.h"
 #include "control_proto.h"
+#include "crypto/crypto_cfg.h"
 #include "test_mode.h"
 
 char fifo_file[1000] = "";
@@ -27,6 +28,10 @@ int output_interval_min = 0 * 1000;
 int output_interval_max = 0 * 1000;
 
 int fix_latency = 0;
+
+// Set once by --cipher/--pad/--port-rotate-sec in process_arg(); the data and
+// control planes read it as immutable state afterwards.
+crypto_cfg_t g_crypto_cfg = {CRYPTO_CIPHER_NONE, 0, 0};
 
 address_t local_addr, remote_addr;
 address_t *out_addr = 0;
@@ -627,6 +632,9 @@ void process_arg(int argc, char *argv[]) {
             {"hello-retry-max", required_argument, 0, 1},
             {"heartbeat-interval", required_argument, 0, 1},
             {"heartbeat-loss-threshold", required_argument, 0, 1},
+            {"cipher", required_argument, 0, 1},
+            {"pad", required_argument, 0, 1},
+            {"port-rotate-sec", required_argument, 0, 1},
             {"test-mode", no_argument, 0, 1},
             {"test-duration", required_argument, 0, 1},
             {"test-pps", required_argument, 0, 1},
@@ -851,6 +859,37 @@ void process_arg(int argc, char *argv[]) {
                         mylog(log_fatal, "--heartbeat-loss-threshold must be >= 1\n");
                         myexit(-1);
                     }
+                } else if (strcmp(long_options[option_index].name, "cipher") == 0) {
+                    if (strcmp(optarg, "none") == 0) {
+                        g_crypto_cfg.cipher = CRYPTO_CIPHER_NONE;
+                    } else if (strcmp(optarg, "xchacha20-ietf-poly1305") == 0) {
+                        g_crypto_cfg.cipher = CRYPTO_CIPHER_XCHACHA20_IETF_POLY1305;
+                    } else {
+                        mylog(log_fatal,
+                              "--cipher must be 'none' or 'xchacha20-ietf-poly1305' (got '%s')\n",
+                              optarg);
+                        myexit(-1);
+                    }
+                    mylog(log_info, "cipher=%s\n", optarg);
+                } else if (strcmp(long_options[option_index].name, "pad") == 0) {
+                    int pad_bucket = -1;
+                    if (sscanf(optarg, "%d", &pad_bucket) != 1 || (pad_bucket != 0 && pad_bucket != 16 && pad_bucket != 32 && pad_bucket != 64)) {
+                        mylog(log_fatal,
+                              "--pad must be 0, 16, 32 or 64 (got '%s')\n", optarg);
+                        myexit(-1);
+                    }
+                    g_crypto_cfg.pad_bucket = pad_bucket;
+                    mylog(log_info, "pad_bucket=%d\n", g_crypto_cfg.pad_bucket);
+                } else if (strcmp(long_options[option_index].name, "port-rotate-sec") == 0) {
+                    int rotate_sec = -1;
+                    if (sscanf(optarg, "%d", &rotate_sec) != 1 || rotate_sec < 0) {
+                        mylog(log_fatal,
+                              "--port-rotate-sec must be >= 0 (0 disables rotation) (got '%s')\n",
+                              optarg);
+                        myexit(-1);
+                    }
+                    g_crypto_cfg.rotate_sec = rotate_sec;
+                    mylog(log_info, "port_rotate_sec=%d\n", g_crypto_cfg.rotate_sec);
                 } else if (strcmp(long_options[option_index].name, "test-mode") == 0) {
                     test_mode = 1;
                     working_mode = test_working_mode;
@@ -990,6 +1029,17 @@ void process_arg(int argc, char *argv[]) {
                 mylog(log_fatal, "unknown option <%x>", opt);
                 myexit(-1);
         }
+    }
+
+    // G10: a non-zero pad bucket is a cipher-mode property (padding without
+    // encryption is not supported), so reject it before any socket is opened.
+    // Checked after the whole option list so --pad/--cipher order does not matter.
+    if (g_crypto_cfg.pad_bucket != 0 && g_crypto_cfg.cipher == CRYPTO_CIPHER_NONE) {
+        mylog(log_fatal,
+              "--pad %d requires --cipher: a non-zero pad bucket is only "
+              "meaningful in cipher mode (xchacha20-ietf-poly1305)\n",
+              g_crypto_cfg.pad_bucket);
+        myexit(-1);
     }
 
     if (is_client == 0 && is_server == 0) {
