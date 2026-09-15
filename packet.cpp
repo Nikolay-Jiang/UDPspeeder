@@ -329,13 +329,61 @@ static void aead_capability_ad(uint8_t ad[2]) {
     ad[1] = (uint8_t)g_crypto_cfg.pad_bucket;
 }
 
+// Cipher-mode bucket padding (todo 6 / G6). Appends `pad_len` fresh random
+// filler bytes then the single byte `pad_len`, so the padded region
+// (shard + filler + pad_len byte) is an exact multiple of the negotiated
+// bucket. The padding lives inside the AEAD plaintext, so the tag covers it,
+// and the bucket itself is bound as associated data (G1). Returns 0 on
+// success, or -1 when the padded region would not fit in buf_len.
+//
+// A bucket of 0 is a strict no-op: no computation and no byte is added, so the
+// wire stays byte-identical to cipher mode without padding. The filler uses the
+// kernel CSPRNG for consistency with the nonce; the tag already authenticates
+// the frame, so its content is not security-critical.
+static int pad_apply(char *data, int &len) {
+    int bucket = g_crypto_cfg.pad_bucket;
+    if (bucket <= 0) return 0;
+
+    int pad_len = (bucket - 1 - (len % bucket) + bucket) % bucket;
+    if (len + pad_len + 1 > buf_len) return -1;
+
+    for (int i = 0; i < pad_len; i += (int)sizeof(u32_t)) {
+        u32_t r = get_secure_random_number_nz();
+        int chunk = pad_len - i;
+        if (chunk > (int)sizeof(u32_t)) chunk = (int)sizeof(u32_t);
+        memcpy(data + len + i, &r, chunk);
+    }
+    data[len + pad_len] = (uint8_t)pad_len;
+    len += pad_len + 1;
+    return 0;
+}
+
+// Cipher-mode bucket strip. The pad_len byte is the last byte of the
+// authenticated plaintext; a bucket of 0 carries no such byte and reads
+// nothing. An out-of-range pad_len (or a frame too short for the strip it
+// declares) is a hard drop: -1 makes the existing receive path discard the
+// shard. Tamper-drop logging is todo 8's job, not this function's.
+static int pad_strip(char *data, int &len) {
+    int bucket = g_crypto_cfg.pad_bucket;
+    if (bucket <= 0) return 0;
+    if (len < 1) return -1;
+
+    int pad_len = (int)(uint8_t)data[len - 1];
+    if (pad_len > bucket - 1) return -1;
+    if (len < 1 + pad_len) return -1;
+
+    len -= 1 + pad_len;
+    return 0;
+}
+
 // Cipher-mode SEND (G12): [nonce(24)][ciphertext][tag(16)]. The plaintext is
 // shifted forward by the nonce length, then the wrapper writes the nonce and
 // encrypts in place, appending the 16-byte tag. The key is the
 // 'udpspeeder/data' KDF output; no SipHash tag and no obscure/XOR layer are
-// applied. Any future bucket padding (todo 6) sits inside the plaintext, so it
-// is covered by the tag automatically.
+// applied. Bucket padding (todo 6) is applied first, so it sits inside the
+// plaintext and the tag covers it automatically.
 static int do_cook_aead(char *data, int &len) {
+    if (pad_apply(data, len) != 0) return -1;
     if (len + AEAD_NONCE_LEN + AEAD_TAG_LEN > buf_len) return -1;
 
     uint8_t key[CRYPTO_KDF_KEY_LEN];
@@ -381,6 +429,9 @@ static int de_cook_aead(char *data, int &len) {
         return -1;
     }
     len = (int)out_len;
+    // Strip the authenticated pad frame only when a bucket was negotiated.
+    // A bad pad_len fails here and the caller drops the shard.
+    if (pad_strip(data, len) != 0) return -1;
     return 0;
 }
 
