@@ -1,7 +1,9 @@
 #include "test_mode.h"
 #include "auth.h"
+#include "crypto/kdf.h"
 #include "crypto/wrap.h"
 #include "log.h"
+#include "packet.h"
 #include <algorithm>
 #include <math.h>
 #include <stdio.h>
@@ -772,6 +774,65 @@ int test_mode_selftest() {
     auth_selftest(g_checks, g_failures);
     data_plane_selftest();
     crypto_selftest(g_checks, g_failures);
+
+    // ---- KDF (G14/G15) ----
+    {
+        // The KDF reads the live PSK, so install a private test key and restore
+        // the previous one afterwards, exactly like auth_selftest does.
+        uint8_t saved_key[16];
+        char saved_xor[sizeof(key_string)];
+        memcpy(saved_key, g_psk, sizeof(saved_key));
+        memcpy(saved_xor, key_string, sizeof(saved_xor));
+
+        uint8_t psk[16];
+        for (int i = 0; i < 16; i++) psk[i] = (uint8_t)(0xa0 + i);
+        auth_key_set(psk);
+
+        uint8_t data_key[CRYPTO_KDF_KEY_LEN], data_key2[CRYPTO_KDF_KEY_LEN];
+        uint8_t ctrl_key[CRYPTO_KDF_KEY_LEN], test_key[CRYPTO_KDF_KEY_LEN];
+        bool derived = crypto_kdf(data_key, CRYPTO_KDF_LABEL_DATA) &&
+                       crypto_kdf(data_key2, CRYPTO_KDF_LABEL_DATA) &&
+                       crypto_kdf(ctrl_key, CRYPTO_KDF_LABEL_CONTROL) &&
+                       crypto_kdf(test_key, CRYPTO_KDF_LABEL_TEST);
+        TCHECK(derived, "KDF must derive a key for all three domain labels");
+        TCHECK(memcmp(data_key, data_key2, CRYPTO_KDF_KEY_LEN) == 0,
+               "same label must derive the same key");
+        TCHECK(memcmp(data_key, ctrl_key, CRYPTO_KDF_KEY_LEN) != 0 &&
+                   memcmp(data_key, test_key, CRYPTO_KDF_KEY_LEN) != 0 &&
+                   memcmp(ctrl_key, test_key, CRYPTO_KDF_KEY_LEN) != 0,
+               "the three domain labels must derive pairwise-different keys");
+        TCHECK(memcmp(data_key, g_psk, sizeof(g_psk)) != 0 &&
+                   memcmp(ctrl_key, g_psk, sizeof(g_psk)) != 0 &&
+                   memcmp(test_key, g_psk, sizeof(g_psk)) != 0,
+               "no derived key may equal the PSK");
+        TCHECK(memcmp(data_key, key_string, CRYPTO_KDF_KEY_LEN) != 0 &&
+                   memcmp(ctrl_key, key_string, CRYPTO_KDF_KEY_LEN) != 0 &&
+                   memcmp(test_key, key_string, CRYPTO_KDF_KEY_LEN) != 0,
+               "no derived key may equal the XOR keystream key_string");
+
+        uint8_t other_psk[16];
+        memcpy(other_psk, psk, sizeof(other_psk));
+        other_psk[0] ^= 0x01;
+        auth_key_set(other_psk);
+        uint8_t other_data[CRYPTO_KDF_KEY_LEN], other_ctrl[CRYPTO_KDF_KEY_LEN],
+            other_test[CRYPTO_KDF_KEY_LEN];
+        bool rederived = crypto_kdf(other_data, CRYPTO_KDF_LABEL_DATA) &&
+                         crypto_kdf(other_ctrl, CRYPTO_KDF_LABEL_CONTROL) &&
+                         crypto_kdf(other_test, CRYPTO_KDF_LABEL_TEST);
+        TCHECK(rederived, "KDF must derive for all three labels after a key change");
+        TCHECK(memcmp(other_data, data_key, CRYPTO_KDF_KEY_LEN) != 0 &&
+                   memcmp(other_ctrl, ctrl_key, CRYPTO_KDF_KEY_LEN) != 0 &&
+                   memcmp(other_test, test_key, CRYPTO_KDF_KEY_LEN) != 0,
+               "changing the PSK must change all three derived keys");
+        TCHECK(memcmp(g_psk, other_psk, sizeof(g_psk)) == 0,
+               "KDF must not mutate the shared PSK");
+
+        TCHECK(!crypto_kdf(0, CRYPTO_KDF_LABEL_DATA) && !crypto_kdf(data_key, 0),
+               "KDF must reject a NULL output or label");
+
+        memcpy(g_psk, saved_key, sizeof(saved_key));
+        memcpy(key_string, saved_xor, sizeof(saved_xor));
+    }
 
     // Harness self-check. Every later task's assertions are only as trustworthy
     // as TCHECK's ability to actually FAIL, so exercise the failure path once

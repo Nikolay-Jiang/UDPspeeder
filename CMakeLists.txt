@@ -31,6 +31,7 @@ set(SOURCE_FILES
         port_range_manager.cpp
         test_mode.cpp
         test_mode_net.cpp
+        crypto/kdf.cpp
         crypto/monocypher.c
         crypto/wrap.c
 )
