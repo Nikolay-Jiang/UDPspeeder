@@ -1,5 +1,6 @@
 #include "test_mode.h"
 #include "auth.h"
+#include "crypto/wrap.h"
 #include "log.h"
 #include <algorithm>
 #include <math.h>
@@ -663,12 +664,114 @@ static int g_failures = 0;
 // test_mode_net.cpp; this file stays pure protocol/statistics logic plus the
 // selftest harness below.
 
+// Exercises the vendored Monocypher bridge (crypto/wrap.h) against published
+// vectors: XChaCha20-Poly1305 from draft-irtf-cfrg-xchacha-03 Appendix A.1 and
+// BLAKE2b-512 over "abc". A broken vendoring or wrapper shows up here as a FAIL.
+void crypto_selftest(int &checks, int &failures) {
+    const auto check = [&](bool ok, const char *description) {
+        checks++;
+        if (!ok) failures++;
+        printf("%s [crypto]: %s\n", ok ? "PASS" : "FAIL", description);
+    };
+
+    // draft-irtf-cfrg-xchacha-03, Appendix A.1 (AEAD_XCHACHA20_POLY1305).
+    uint8_t key[32], nonce[24];
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)(0x80 + i);
+    for (int i = 0; i < 24; i++) nonce[i] = (uint8_t)(0x40 + i);
+    const uint8_t aad[12] = {0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1,
+                             0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7};
+    const char plain[] =
+        "Ladies and Gentlemen of the class of '99: If I could offer you only "
+        "one tip for the future, sunscreen would be it.";
+    const size_t plain_len = sizeof(plain) - 1;  // 114
+    const uint8_t expected_ct[114] = {
+        0xbd, 0x6d, 0x17, 0x9d, 0x3e, 0x83, 0xd4, 0x3b, 0x95, 0x76, 0x57,
+        0x94, 0x93, 0xc0, 0xe9, 0x39, 0x57, 0x2a, 0x17, 0x00, 0x25, 0x2b,
+        0xfa, 0xcc, 0xbe, 0xd2, 0x90, 0x2c, 0x21, 0x39, 0x6c, 0xbb, 0x73,
+        0x1c, 0x7f, 0x1b, 0x0b, 0x4a, 0xa6, 0x44, 0x0b, 0xf3, 0xa8, 0x2f,
+        0x4e, 0xda, 0x7e, 0x39, 0xae, 0x64, 0xc6, 0x70, 0x8c, 0x54, 0xc2,
+        0x16, 0xcb, 0x96, 0xb7, 0x2e, 0x12, 0x13, 0xb4, 0x52, 0x2f, 0x8c,
+        0x9b, 0xa4, 0x0d, 0xb5, 0xd9, 0x45, 0xb1, 0x1b, 0x69, 0xb9, 0x82,
+        0xc1, 0xbb, 0x9e, 0x3f, 0x3f, 0xac, 0x2b, 0xc3, 0x69, 0x48, 0x8f,
+        0x76, 0xb2, 0x38, 0x35, 0x65, 0xd3, 0xff, 0xf9, 0x21, 0xf9, 0x66,
+        0x4c, 0x97, 0x63, 0x7d, 0xa9, 0x76, 0x88, 0x12, 0xf6, 0x15, 0xc6,
+        0x8b, 0x13, 0xb5, 0x2e};
+    const uint8_t expected_tag[16] = {0xc0, 0x87, 0x59, 0x24, 0xc1, 0xc7,
+                                      0x98, 0x79, 0x47, 0xde, 0xaf, 0xd8,
+                                      0x78, 0x0a, 0xcf, 0x49};
+
+    uint8_t frame[CRYPTO_WRAP_NONCE_LEN + sizeof(plain) + CRYPTO_WRAP_TAG_LEN];
+    size_t frame_len = 0;
+    int rc = crypto_wrap_aead_encrypt(frame, sizeof(frame), &frame_len, key,
+                                      nonce, aad, sizeof(aad),
+                                      (const uint8_t *)plain, plain_len);
+    check(rc == 0 && frame_len == 24 + plain_len + 16,
+          "XChaCha20-Poly1305 encrypt returns the G12 frame length");
+    check(memcmp(frame, nonce, 24) == 0, "G12 frame starts with the nonce");
+    check(memcmp(frame + 24, expected_ct, sizeof(expected_ct)) == 0,
+          "ciphertext matches draft-irtf-cfrg-xchacha Appendix A.1");
+    check(memcmp(frame + 24 + plain_len, expected_tag, sizeof(expected_tag)) == 0,
+          "Poly1305 tag matches draft-irtf-cfrg-xchacha Appendix A.1");
+
+    uint8_t recovered[sizeof(plain)];
+    size_t recovered_len = 0;
+    rc = crypto_wrap_aead_decrypt(recovered, sizeof(recovered), &recovered_len,
+                                  key, aad, sizeof(aad), frame, frame_len);
+    check(rc == 0 && recovered_len == plain_len &&
+              memcmp(recovered, plain, plain_len) == 0,
+          "the G12 frame decrypts back to the plaintext");
+
+    frame[24 + 7] ^= 0x01;
+    check(crypto_wrap_aead_decrypt(recovered, sizeof(recovered), &recovered_len,
+                                   key, aad, sizeof(aad), frame, frame_len) == -1,
+          "one flipped ciphertext byte is rejected");
+    frame[24 + 7] ^= 0x01;
+
+    uint8_t wrong_key[32];
+    memcpy(wrong_key, key, sizeof(wrong_key));
+    wrong_key[0] ^= 0x01;
+    check(crypto_wrap_aead_decrypt(recovered, sizeof(recovered), &recovered_len,
+                                   wrong_key, aad, sizeof(aad), frame,
+                                   frame_len) == -1,
+          "a different key is rejected");
+
+    uint8_t wrong_aad[12];
+    memcpy(wrong_aad, aad, sizeof(wrong_aad));
+    wrong_aad[0] ^= 0x01;
+    check(crypto_wrap_aead_decrypt(recovered, sizeof(recovered), &recovered_len,
+                                   key, wrong_aad, sizeof(wrong_aad), frame,
+                                   frame_len) == -1,
+          "a different associated-data value is rejected");
+
+    check(crypto_wrap_aead_encrypt(frame, 8, &frame_len, key, nonce, aad,
+                                   sizeof(aad), (const uint8_t *)plain,
+                                   plain_len) == -1,
+          "encrypt refuses a frame that does not fit");
+    check(crypto_wrap_aead_decrypt(recovered, 4, &recovered_len, key, aad,
+                                   sizeof(aad), frame, frame_len) == -1,
+          "decrypt refuses a plaintext that does not fit");
+
+    // BLAKE2b-512 over "abc" (the canonical unkeyed test vector).
+    uint8_t digest[64];
+    crypto_wrap_blake2b(digest, sizeof(digest), (const uint8_t *)"abc", 3);
+    const uint8_t expected_digest[64] = {
+        0xba, 0x80, 0xa5, 0x3f, 0x98, 0x1c, 0x4d, 0x0d, 0x6a, 0x27, 0x97,
+        0xb6, 0x9f, 0x12, 0xf6, 0xe9, 0x4c, 0x21, 0x2f, 0x14, 0x68, 0x5a,
+        0xc4, 0xb7, 0x4b, 0x12, 0xbb, 0x6f, 0xdb, 0xff, 0xa2, 0xd1, 0x7d,
+        0x87, 0xc5, 0x39, 0x2a, 0xab, 0x79, 0x2d, 0xc2, 0x52, 0xd5, 0xde,
+        0x45, 0x33, 0xcc, 0x95, 0x18, 0xd3, 0x8a, 0xa8, 0xdb, 0xf1, 0x92,
+        0x5a, 0xb9, 0x23, 0x86, 0xed, 0xd4, 0x00, 0x99, 0x23};
+    check(memcmp(digest, expected_digest, sizeof(expected_digest)) == 0,
+          "BLAKE2b-512(\"abc\") matches the published vector");
+}
+
 int test_mode_selftest() {
     g_checks = 0;
     g_failures = 0;
 
     auth_selftest(g_checks, g_failures);
     data_plane_selftest();
+    crypto_selftest(g_checks, g_failures);
 
     // Harness self-check. Every later task's assertions are only as trustworthy
     // as TCHECK's ability to actually FAIL, so exercise the failure path once

@@ -31,6 +31,8 @@ set(SOURCE_FILES
         port_range_manager.cpp
         test_mode.cpp
         test_mode_net.cpp
+        crypto/monocypher.c
+        crypto/wrap.c
 )
 set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-unused-variable -Wno-unused-parameter -Wno-missing-field-initializers -O2 -g -fsanitize=address,undefined")
 
