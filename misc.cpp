@@ -1016,6 +1016,7 @@ void process_arg(int argc, char *argv[]) {
                     mylog(log_warn, "changed tun_mtu,tun_mtu=%d\n", tun_mtu);
                 } else if (strcmp(long_options[option_index].name, "header-overhead") == 0) {
                     sscanf(optarg, "%d", &header_overhead);
+                    header_overhead_set = 1;
                     mylog(log_warn, "changed header_overhead,header_overhead=%d\n", header_overhead);
                 } else if (strcmp(long_options[option_index].name, "mssfix") == 0) {
                     sscanf(optarg, "%d", &mssfix);

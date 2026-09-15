@@ -10,6 +10,8 @@
 #include "common.h"
 #include "lib/rs.h"
 #include "fd_manager.h"
+#include "packet.h"
+#include <algorithm>
 
 // int g_fec_data_num=20;
 // int g_fec_redundant_num=10;
@@ -29,6 +31,7 @@ const int decode_fast_send = 1;
 
 int short_packet_optimize = 1;
 int header_overhead = 44;
+int header_overhead_set = 0;
 
 u32_t fec_buff_num = 2000;  // how many packet can fec_decode_manager hold. shouldnt be very large,or it will cost huge memory
 
@@ -264,8 +267,10 @@ int fec_encode_manager_t::input(char *s, int len /*,int &is_first_packet*/) {
             actual_data_num = tail_x;
             actual_redundant_num = tail_y;
 
+            int effective_header_overhead = header_overhead_set ? header_overhead : std::max(cook_overhead(), 44);
+
             if (short_packet_optimize) {
-                u32_t best_len = (blob_encode.get_shard_len(tail_x, 0) + header_overhead) * (tail_x + tail_y);
+                u32_t best_len = (blob_encode.get_shard_len(tail_x, 0) + effective_header_overhead) * (tail_x + tail_y);
                 int best_data_num = tail_x;
                 assert(tail_x <= fec_par.rs_cnt);
                 for (int i = 1; i < tail_x; i++) {
@@ -276,7 +281,7 @@ int fec_encode_manager_t::input(char *s, int len /*,int &is_first_packet*/) {
                     u32_t shard_len = blob_encode.get_shard_len(tmp_x, 0);
                     if (shard_len > (u32_t)fec_par.mtu) continue;
 
-                    u32_t new_len = (shard_len + header_overhead) * (tmp_x + tmp_y);
+                    u32_t new_len = (shard_len + effective_header_overhead) * (tmp_x + tmp_y);
                     if (new_len < best_len) {
                         best_len = new_len;
                         best_data_num = tmp_x;

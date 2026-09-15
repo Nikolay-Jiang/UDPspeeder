@@ -26,6 +26,14 @@ extern int disable_obscure;
 extern int disable_xor;
 
 static const int IO_BATCH_MAX = 64;
+
+// Data-plane framing sizes (V3). cook_overhead() sums the active mode's
+// per-shard bytes so FEC shard sizing and MTU accounting stay honest.
+const int SIPHASH_TAG_LEN = 8;
+const int AEAD_NONCE_LEN = 24;
+const int AEAD_TAG_LEN = 16;
+const int PAD_MAX = 64;
+
 void my_send_batch_begin();
 void my_send_flush();
 
@@ -35,8 +43,6 @@ void encrypt_0(char *input, int &len, char *key);
 void decrypt_0(char *input, int &len, char *key);
 int add_seq(char *data, int &data_len);
 int remove_seq(char *data, int &data_len);
-int do_obscure(const char *input, int in_len, char *output, int &out_len);
-int de_obscure(const char *input, int in_len, char *output, int &out_len);
 
 // int sendto_fd_u64 (int fd,u64_t u64,char * buf, int len,int flags);
 int sendto_ip_port(u32_t ip, int port, char *buf, int len, int flags);
@@ -46,6 +52,7 @@ int put_conv(u32_t conv, const char *input, int len_in, char *&output, int &len_
 int get_conv(u32_t &conv, const char *input, int len_in, char *&output, int &len_out);
 int put_siphtag(char *s, int &len);
 int rm_siphtag(char *s, int &len);
+int cook_overhead();
 int do_cook(char *data, int &len);
 int de_cook(char *s, int &len);
 #endif /* PACKET_H_ */

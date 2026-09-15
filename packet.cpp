@@ -10,6 +10,7 @@
 #include "packet.h"
 #include "misc.h"
 #include "auth.h"
+#include "crypto/crypto_cfg.h"
 #include <algorithm>
 
 int iv_min = 4;
@@ -124,9 +125,9 @@ void decrypt_0(char *input, int &len, char *key) {
 
 int do_obscure(char *data, int &len) {
     assert(len >= 0);
-    assert(len < buf_len);
 
     int iv_len = random_between(iv_min, iv_max);
+    if (len + iv_len + 1 > buf_len) return -1;
     get_fake_random_chars(data + len, iv_len);
     data[iv_len + len] = (uint8_t)iv_len;
     for (int i = 0, j = 0; i < len; i++, j++) {
@@ -188,7 +189,9 @@ int send_fd(int fd, char *buf, int len, int flags) {
 
 int my_send(const dest_t &dest, char *data, int len) {
     if (dest.cook) {
-        do_cook(data, len);
+        if (do_cook(data, len) != 0) {
+            return -1;
+        }
     }
     if (s_batching && s_send_n == IO_BATCH_MAX) {
         // Batch full: flush it before handling this packet so it stays behind the
@@ -291,16 +294,27 @@ int my_send(const dest_t &dest, char *data, int len) {
 
 int put_siphtag(char *s, int &len) {
     assert(len >= 0);
-    uint8_t tag[8];
+    if (len + SIPHASH_TAG_LEN > buf_len) return -1;
+    uint8_t tag[SIPHASH_TAG_LEN];
     auth_tag(DOMAIN_DATA, (const uint8_t *)s, (size_t)len, tag);
     memcpy(s + len, tag, sizeof(tag));
-    len += (int)sizeof(tag);
+    len += SIPHASH_TAG_LEN;
     return 0;
 }
 
+int cook_overhead() {
+    int base = (g_crypto_cfg.cipher != CRYPTO_CIPHER_NONE) ? (AEAD_NONCE_LEN + AEAD_TAG_LEN) : (SIPHASH_TAG_LEN + iv_max + 1);
+    int pad = (g_crypto_cfg.pad_bucket > 0) ? (1 + PAD_MAX) : 0;
+    return base + pad;
+}
+
 int do_cook(char *data, int &len) {
-    put_siphtag(data, len);
-    if (!disable_obscure) do_obscure(data, len);
+    int ret = put_siphtag(data, len);
+    if (ret != 0) return ret;
+    if (!disable_obscure) {
+        ret = do_obscure(data, len);
+        if (ret != 0) return ret;
+    }
     if (!disable_xor) encrypt_0(data, len, key_string);
     return 0;
 }
