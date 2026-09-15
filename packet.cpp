@@ -8,6 +8,7 @@
 #include "common.h"
 #include "log.h"
 #include "packet.h"
+#include "connection.h"
 #include "misc.h"
 #include "auth.h"
 #include "crypto/crypto_cfg.h"
@@ -448,20 +449,26 @@ int do_cook(char *data, int &len) {
     return 0;
 }
 
-int de_cook(char *s, int &len) {
-    if (g_crypto_cfg.cipher != CRYPTO_CIPHER_NONE) return de_cook_aead(s, len);
+int de_cook(char *s, int &len, const address_t *src) {
+    if (g_crypto_cfg.cipher != CRYPTO_CIPHER_NONE) {
+        int ret = de_cook_aead(s, len);
+        if (ret != 0) auth_drop_note(auth_plane_data, src);
+        return ret;
+    }
 
     if (!disable_xor) decrypt_0(s, len, key_string);
     if (!disable_obscure) {
         int ret = de_obscure(s, len);
         if (ret != 0) {
             mylog(log_debug, "de_obscure fail\n");
+            auth_drop_note(auth_plane_data, src);
             return ret;
         }
     }
     int ret = rm_siphtag(s, len);
     if (ret != 0) {
         mylog(log_debug, "siphash tag check failed\n");
+        auth_drop_note(auth_plane_data, src);
         return ret;
     }
     return 0;

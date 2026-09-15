@@ -565,6 +565,7 @@ int set_buf_size(int fd, int socket_buf_size) {
 }
 
 void myexit(int a) {
+    auth_drop_flush();
     delay_manager.log_stats();
     if (enable_log_color)
         printf("%s\n", RESET);

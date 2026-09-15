@@ -54,5 +54,7 @@ int put_siphtag(char *s, int &len);
 int rm_siphtag(char *s, int &len);
 int cook_overhead();
 int do_cook(char *data, int &len);
-int de_cook(char *s, int &len);
+// `src` is the datagram source when the receive path knows it; it feeds the
+// per-plane tamper-drop log (todo 8). Selftests call this without a source.
+int de_cook(char *s, int &len, const address_t *src = NULL);
 #endif /* PACKET_H_ */

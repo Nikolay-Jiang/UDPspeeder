@@ -193,7 +193,7 @@ static void local_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int rev
             mylog(log_warn, "huge packet,data len=%d (>=%d).strongly suggested to set a smaller mtu at upper level,to get rid of this warn\n ", data_len, mtu_warn);
         }
 
-        if (de_cook(data, data_len) != 0) {
+        if (de_cook(data, data_len, &addr) != 0) {
             mylog(log_debug, "de_cook error");
             continue;
         }
@@ -375,11 +375,17 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
                        (struct sockaddr *)&src_stor, &src_len);
     if (len <= 0 || len > (int)sizeof(buf)) return;
 
+    address_t src;
+    src.from_sockaddr((struct sockaddr *)&src_stor, src_len);
+
     uint8_t *payload;
     int payload_len;
     ctrl_hdr_t hdr;
     int msg_type = ctrl_decode(buf, len, &payload, &payload_len, &hdr);
-    if (msg_type < 0) return;
+    if (msg_type < 0) {
+        auth_drop_note(auth_plane_control, &src);
+        return;
+    }
 
     // Validate the complete fixed-size request before touching replay state.
     if (msg_type == CTRL_HELLO) {
@@ -391,9 +397,6 @@ static void control_listen_cb(struct ev_loop *loop, struct ev_io *watcher, int r
     }
 
     ctrl_replay_expire(get_current_time());
-
-    address_t src;
-    src.from_sockaddr((struct sockaddr *)&src_stor, src_len);
 
     if (msg_type == CTRL_HELLO || msg_type == CTRL_HEARTBEAT || msg_type == CTRL_BYE) {
         if (!ctrl_replay_accept(payload, hdr.nonce, hdr.timestamp_ms)) {
@@ -586,6 +589,7 @@ int tunnel_server_event_loop() {
 
     mylog(log_warn, "ev_run returned\n");
     ctrl_replay_report(true);
+    auth_drop_flush();
     myexit(0);
 
     /*

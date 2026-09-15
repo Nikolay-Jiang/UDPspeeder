@@ -177,6 +177,31 @@ int clear_inactive(char * ip_port=0);
 int clear_inactive0(char * ip_port);*/
 };  // g_conv_manager;
 
+// --- tamper-drop observability (todo 8) ---
+//
+// Every receive-path verification failure (data-plane SipHash/AEAD, control-
+// plane MAC) bumps a cumulative per-plane counter. The individual rejections
+// are debug-gated elsewhere, so these counters plus a warn line rate-limited
+// to one per plane per 10 s are what an operator sees at the default log
+// level: a tampered flood stays visible without being able to fill the log.
+// Data and control planes throttle independently, so a control flood cannot
+// mask data tampers.
+enum auth_plane_t { auth_plane_data = 0, auth_plane_control = 1, auth_plane_count = 2 };
+
+struct auth_drop_stat_t {
+    u64_t data;
+    u64_t control;
+};
+extern auth_drop_stat_t g_auth_drop;
+
+// Record one failed verification on `plane`. Emits at most one warn line per
+// plane per 10 s, including the source address when known (src may be NULL in
+// in-process selftests). Never logs the PSK, derived keys, or plaintext.
+void auth_drop_note(auth_plane_t plane, const address_t *src);
+// Emit any count not yet displayed, so a clean shutdown always reports the
+// final totals.
+void auth_drop_flush();
+
 struct inner_stat_t {
     u64_t input_packet_num;
     u64_t input_packet_size;
@@ -198,9 +223,10 @@ struct stat_t {
             last_report_time = get_current_time();
             inner_stat_t &a = normal_to_fec;
             inner_stat_t &b = fec_to_normal;
-            mylog(log_info, "[report]client-->server:(original:%llu pkt;%llu byte) (fec:%llu pkt,%llu byte)  server-->client:(original:%llu pkt;%llu byte) (fec:%llu pkt;%llu byte)\n",
+            mylog(log_info, "[report]client-->server:(original:%llu pkt;%llu byte) (fec:%llu pkt,%llu byte)  server-->client:(original:%llu pkt;%llu byte) (fec:%llu pkt;%llu byte)  auth_drop: data=%llu control=%llu\n",
                   a.input_packet_num, a.input_packet_size, a.output_packet_num, a.output_packet_size,
-                  b.output_packet_num, b.output_packet_size, b.input_packet_num, b.input_packet_size);
+                  b.output_packet_num, b.output_packet_size, b.input_packet_num, b.input_packet_size,
+                  (unsigned long long)g_auth_drop.data, (unsigned long long)g_auth_drop.control);
         }
     }
     void report_as_server(address_t &addr) {
@@ -208,10 +234,11 @@ struct stat_t {
             last_report_time = get_current_time();
             inner_stat_t &a = fec_to_normal;
             inner_stat_t &b = normal_to_fec;
-            mylog(log_info, "[report][%s]client-->server:(original:%llu pkt;%llu byte) (fec:%llu pkt;%llu byte)  server-->client:(original:%llu pkt;%llu byte) (fec:%llu pkt;%llu byte)\n",
+            mylog(log_info, "[report][%s]client-->server:(original:%llu pkt;%llu byte) (fec:%llu pkt;%llu byte)  server-->client:(original:%llu pkt;%llu byte) (fec:%llu pkt;%llu byte)  auth_drop: data=%llu control=%llu\n",
                   addr.get_str(),
                   a.output_packet_num, a.output_packet_size, a.input_packet_num, a.input_packet_size,
-                  b.input_packet_num, b.input_packet_size, b.output_packet_num, b.output_packet_size);
+                  b.input_packet_num, b.input_packet_size, b.output_packet_num, b.output_packet_size,
+                  (unsigned long long)g_auth_drop.data, (unsigned long long)g_auth_drop.control);
         }
     }
 };

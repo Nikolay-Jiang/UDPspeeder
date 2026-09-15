@@ -13,12 +13,13 @@
 #      No run of >= 3 consecutive seconds with zero delivered replies, at
 #      least one reply in the final 5s, and >= 90% of sent probes echoed.
 #   2. Fail-closed: the wrong-key flood source receives zero tunneled replies.
-#   3. Bounded auth-failure logging: auth-failure lines visible at the
-#      operational (default) log level over the window are <= 5 per 60s
-#      (todo 20: `lines/60 <= 5`). Per-packet detail is debug-gated, so a
-#      regression that logs each rejected packet at warn/info blows this
-#      budget. A short --log-level 5 positive control proves rejected packets
-#      are detected, so a zero count is not vacuous.
+#   3. Bounded auth-failure logging: the per-plane tamper-drop warn line is
+#      rate-limited to one data-plane line per 10s, plus one shutdown
+#      force-flush, for the 60s wrong-key data flood (G19); the budget is 8/60s.
+#      Per-packet detail is debug-gated, so a regression that logs each
+#      rejected packet at warn/info blows this budget. A short --log-level 5
+#      positive control proves rejected packets are detected, so a zero count
+#      is not vacuous.
 #   4. Counters: `delay: pool=<n> fallback_malloc=<m> queue_high_water=<h>
 #      short_send_drop=<d>` is emitted by both ends at shutdown and h <= n.
 #   5. --report 1: no event-loop stall. Log timestamps have 1s resolution and
@@ -56,8 +57,8 @@ HEALTHY_PPS=10             # healthy probe rate
 FLOOD_PPS=500              # wrong-key flood rate
 FEC_PARAMS="-f20:10"
 JITTER_MS=100
-AUTH_FAIL_RE="siphash tag check failed|de_obscure fail|de_cook error"
-AUTH_BUDGET_PER_60=5
+AUTH_FAIL_RE="auth_drop: plane=|siphash tag check failed|de_obscure fail|de_cook error"
+AUTH_BUDGET_PER_60=8
 
 if [[ ! -x "$BIN" ]]; then
     echo "ERROR: binary not found or not executable: $BIN"
