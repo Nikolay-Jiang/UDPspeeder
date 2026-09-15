@@ -11,6 +11,8 @@
 #include "misc.h"
 #include "auth.h"
 #include "crypto/crypto_cfg.h"
+#include "crypto/kdf.h"
+#include "crypto/wrap.h"
 #include <algorithm>
 
 int iv_min = 4;
@@ -308,7 +310,83 @@ int cook_overhead() {
     return base + pad;
 }
 
+// Fill a fresh 24-byte nonce from the kernel CSPRNG (G13). my_random (mt19937)
+// is invertible and must never produce an AEAD nonce: recovering its state
+// would let an observer predict every nonce. 6 u32 draws cover 24 bytes.
+static void aead_fill_nonce(uint8_t nonce[AEAD_NONCE_LEN]) {
+    for (int i = 0; i < AEAD_NONCE_LEN; i += (int)sizeof(u32_t)) {
+        u32_t r = get_secure_random_number_nz();
+        memcpy(nonce + i, &r, sizeof(r));
+    }
+}
+
+// The 2 serialized capability bytes {cipher_id, pad_bucket} bound as AEAD
+// associated data (G1/G2). A peer configured with a different cipher or pad
+// bucket authenticates the same bytes differently, so the mismatch fails
+// verification and the packet is dropped rather than silently delivered.
+static void aead_capability_ad(uint8_t ad[2]) {
+    ad[0] = (uint8_t)g_crypto_cfg.cipher;
+    ad[1] = (uint8_t)g_crypto_cfg.pad_bucket;
+}
+
+// Cipher-mode SEND (G12): [nonce(24)][ciphertext][tag(16)]. The plaintext is
+// shifted forward by the nonce length, then the wrapper writes the nonce and
+// encrypts in place, appending the 16-byte tag. The key is the
+// 'udpspeeder/data' KDF output; no SipHash tag and no obscure/XOR layer are
+// applied. Any future bucket padding (todo 6) sits inside the plaintext, so it
+// is covered by the tag automatically.
+static int do_cook_aead(char *data, int &len) {
+    if (len + AEAD_NONCE_LEN + AEAD_TAG_LEN > buf_len) return -1;
+
+    uint8_t key[CRYPTO_KDF_KEY_LEN];
+    if (!crypto_kdf(key, CRYPTO_KDF_LABEL_DATA)) return -1;
+
+    uint8_t ad[2];
+    aead_capability_ad(ad);
+
+    uint8_t nonce[AEAD_NONCE_LEN];
+    aead_fill_nonce(nonce);
+
+    memmove(data + AEAD_NONCE_LEN, data, len);
+    size_t out_len = 0;
+    if (crypto_wrap_aead_encrypt((uint8_t *)data, (size_t)buf_len, &out_len,
+                                 key, nonce, ad, sizeof(ad),
+                                 (const uint8_t *)(data + AEAD_NONCE_LEN), (size_t)len) != 0) {
+        return -1;
+    }
+    len = (int)out_len;
+    return 0;
+}
+
+// Cipher-mode RECV: verify the AEAD first and fail closed, returning non-zero
+// so the caller drops the packet. A successful decrypt writes the recovered
+// plaintext to offset 0 of the shard buffer, which is exactly what
+// from_fec_normal/from_fec_to_normal consume. The replay filter is untouched.
+static int de_cook_aead(char *data, int &len) {
+    if (len < AEAD_NONCE_LEN + AEAD_TAG_LEN) return -1;
+    // With bucket padding (todo 6) the frame carries one more authenticated
+    // byte, so a frame too short to hold it can never be valid.
+    if (g_crypto_cfg.pad_bucket > 0 && len < AEAD_NONCE_LEN + AEAD_TAG_LEN + 1) return -1;
+
+    uint8_t key[CRYPTO_KDF_KEY_LEN];
+    if (!crypto_kdf(key, CRYPTO_KDF_LABEL_DATA)) return -1;
+
+    uint8_t ad[2];
+    aead_capability_ad(ad);
+
+    size_t out_len = 0;
+    if (crypto_wrap_aead_decrypt((uint8_t *)data, (size_t)buf_len, &out_len,
+                                 key, ad, sizeof(ad),
+                                 (const uint8_t *)data, (size_t)len) != 0) {
+        return -1;
+    }
+    len = (int)out_len;
+    return 0;
+}
+
 int do_cook(char *data, int &len) {
+    if (g_crypto_cfg.cipher != CRYPTO_CIPHER_NONE) return do_cook_aead(data, len);
+
     int ret = put_siphtag(data, len);
     if (ret != 0) return ret;
     if (!disable_obscure) {
@@ -320,6 +398,8 @@ int do_cook(char *data, int &len) {
 }
 
 int de_cook(char *s, int &len) {
+    if (g_crypto_cfg.cipher != CRYPTO_CIPHER_NONE) return de_cook_aead(s, len);
+
     if (!disable_xor) decrypt_0(s, len, key_string);
     if (!disable_obscure) {
         int ret = de_obscure(s, len);
