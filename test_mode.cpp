@@ -773,6 +773,7 @@ int test_mode_selftest() {
 
     auth_selftest(g_checks, g_failures);
     data_plane_selftest();
+    data_plane_cipher_selftest();
     crypto_selftest(g_checks, g_failures);
 
     // ---- KDF (G14/G15) ----

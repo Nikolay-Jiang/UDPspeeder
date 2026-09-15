@@ -51,13 +51,22 @@ start_tunnel() {
     local drop_args=()
     [[ "$drop" -gt 0 ]] && drop_args=(--random-drop "$drop")
 
+    # Optional passthrough for scripted cipher/pad suites, e.g.
+    #   SMOKE_EXTRA_ARGS="--cipher xchacha20-ietf-poly1305 --pad 32" bash tests/smoke.sh
+    # Applied to BOTH ends, because --cipher and --pad must match on both sides.
+    # Unset (the default) leaves every command line exactly as it was before.
+    local extra_args=()
+    if [[ -n "${SMOKE_EXTRA_ARGS:-}" ]]; then
+        read -r -a extra_args <<< "$SMOKE_EXTRA_ARGS"
+    fi
+
     "$BINARY" -s -l "0.0.0.0:$TUNNEL_PORT" -r "127.0.0.1:$ECHO_PORT" \
-              -f20:10 -k "$KEY" "${drop_args[@]}" \
+              -f20:10 -k "$KEY" "${drop_args[@]}" "${extra_args[@]}" \
               >/dev/null 2>&1 &
     PIDS+=($!)
 
     "$BINARY" -c -l "0.0.0.0:$CLIENT_PORT" -r "127.0.0.1:$TUNNEL_PORT" \
-              -f20:10 -k "$KEY" "${drop_args[@]}" \
+              -f20:10 -k "$KEY" "${drop_args[@]}" "${extra_args[@]}" \
               >/dev/null 2>&1 &
     PIDS+=($!)
 
