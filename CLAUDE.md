@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-UDPspeeder V2 (`speederv2`) — a UDP tunnel that reduces packet loss on lossy links by applying Reed-Solomon Forward Error Correction, optionally combined with a UDP-based VPN to accelerate arbitrary traffic. C++11, event-loop based (libev), Linux x86 / x86_64 only.
+UDPspeeder V3 (`speederv2`) — a UDP tunnel that reduces packet loss on lossy links by applying Reed-Solomon Forward Error Correction, optionally combined with a UDP-based VPN to accelerate arbitrary traffic. C++11, event-loop based (libev), Linux x86 / x86_64 only.
 
 ## Build
 
@@ -48,7 +48,7 @@ The program is a single process running one libev event loop, with two entry poi
 - `fec_manager.*` — the FEC scheduler. Accumulates incoming packets into a group, runs the Reed-Solomon encoder from `lib/rs.cpp` / `lib/fec.cpp` when the group fills or `--timeout` expires, and emits encoded packets. On receive, it reassembles groups and attempts correction. Supports both a single `-f x:y` and the fine-grained `-f x1:y1,x2:y2,...` form.
 - `packet.*` — per-packet framing: obscure, XOR obfuscation, SipHash-2-4 authentication (`auth.*`, `siphash.*`), sequence numbers, headers.
 - `auth.*` / `siphash.*` — SipHash-2-4 MAC over all four wire planes, keyed by the 32-hex PSK with a per-plane domain tweak; also derives the XOR obfuscation keystream one-way from the PSK.
-- `control_proto.*` / `port_range_manager.*` — port-range control handshake (version 2), routing, and per-session bounded replay.
+- `control_proto.*` / `port_range_manager.*` — port-range control handshake (version 3), routing, and per-session bounded replay.
 - `delay_manager.*` — implements `--jitter` (random delay of first packet) and `--interval` (scattering a FEC group across a time interval to defend against burst loss).
 - `connection.*` — tracks client-side connection state keyed by source address, used on the server to route decoded packets back to the originating client.
 - `fd_manager.*` — thin socket helpers (bind, connect, non-blocking setup).

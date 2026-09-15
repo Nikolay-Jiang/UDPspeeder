@@ -246,7 +246,7 @@ You should see packets distributed across multiple destination ports in the rang
 
 #### Control-Plane Protocol
 
-The control plane uses an independent version-2 packet structure (version, msg_type, nonce, timestamp, payload, MAC).
+The control plane uses an independent version-3 packet structure (version, msg_type, nonce, timestamp, payload, MAC).
 
 - **MAC algorithm:** `siphash` only (SipHash-2-4 keyed by the shared PSK). The old `legacy` algorithm and the version-1 header were removed; `--control-mac legacy` is a fatal startup error.
 - **Messages:** `HELLO` (client → server), `HELLO_ACK` (server → client, carries session_id and port list), `HEARTBEAT` + `HEARTBEAT_ACK` (keepalive), `BYE` (teardown).
@@ -419,7 +419,7 @@ touching the network.
 > authoritative list.
 
 ```
-UDPspeeder V2
+UDPspeeder V3
 git version: 3e248b414c    build date: Aug  5 2018 21:59:52
 repository: https://github.com/wangyu-/UDPspeeder
 

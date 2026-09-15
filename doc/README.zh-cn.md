@@ -100,7 +100,7 @@ https://github.com/wangyu-/udp2raw-tunnel
 
 ### 命令选项
 ```
-UDPspeeder V2
+UDPspeeder V3
 git version: 3e248b414c    build date: Aug  5 2018 21:59:52
 repository: https://github.com/wangyu-/UDPspeeder
 
