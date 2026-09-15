@@ -38,13 +38,17 @@ static void print_help() {
     printf("                                          obfuscation and siphash authentication, which does NOT encrypt.\n");
     printf("                                          'xchacha20-ietf-poly1305' adds real xchacha20-poly1305 aead encryption:\n");
     printf("                                          encryption exists only with this option, and both ends must set the\n");
-    printf("                                          same value or packets are rejected.\n");
-    printf("    --pad                 <0|16|32|64>    pad data packets into a fixed size bucket. default: 0 (off).\n");
-    printf("                                          a non-zero bucket requires --cipher and must match on both ends.\n");
-    printf("    --port-rotate-sec     <sec>           (client, port-range mode) advance the round-robin data-port send\n");
-    printf("                                          base every <sec> seconds. default: 0 (rotation off).\n");
-    printf("      NOTE: in port-range mode a --cipher/--pad mismatch is rejected at the handshake. normal mode has\n");
-    printf("            no negotiation, so a mismatch surfaces as dropped (tamper-logged) packets instead.\n");
+    printf("                                          same value or packets are rejected. the aead frame adds 40 bytes per\n");
+    printf("                                          packet (24-byte random nonce + 16-byte poly1305 tag), replacing the\n");
+    printf("                                          8-byte siphash data-plane tag and the obscure layer.\n");
+    printf("    --pad                 <0|16|32|64>    pad the plaintext into a fixed size bucket. default: 0 (off).\n");
+    printf("                                          a non-zero bucket requires --cipher and must match on both ends; it\n");
+    printf("                                          adds a 1-byte pad_len plus up to 64 authenticated pad bytes.\n");
+    printf("    --port-rotate-sec     <sec>           (client, port-range mode only) advance the round-robin data-port\n");
+    printf("                                          send base every <sec> seconds. default: 0 (rotation off).\n");
+    printf("      NOTE: in port-range mode a --cipher/--pad mismatch is refused at the handshake. normal mode has no\n");
+    printf("            negotiation, so a mismatch (including a different --pad) is dropped and logged as\n");
+    printf("            'auth_drop: plane=...' instead. old/incompatible peers are always rejected.\n");
 
     printf("main options:\n");
     printf("    -f,--fec              x:y             forward error correction, send y redundant packets for every x packets\n");

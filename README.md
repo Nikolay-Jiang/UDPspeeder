@@ -96,6 +96,130 @@ rejected. It does **not encrypt**. The existing XOR and obscure layer is
 obfuscation only, so it changes the wire pattern but is never confidentiality.
 
 
+# Encryption and Obfuscation (V3)
+
+UDPspeeder V3 keeps two things separate that are easy to conflate:
+
+- **Obfuscation** is on by default. The data plane randomizes packet length,
+  fills and XORs bytes, and appends an 8-byte SipHash-2-4 authentication tag.
+  This changes the wire pattern and authenticates every packet, but it does
+  **not encrypt** anything: the payload is not confidential. The default mode
+  does not encrypt, and none of these docs claim otherwise.
+- **Real encryption** is off by default; it exists only when both ends are
+  started with `--cipher xchacha20-ietf-poly1305`. With that flag the data
+  plane uses XChaCha20-Poly1305: a fresh 24-byte random nonce, the ciphertext,
+  and a 16-byte Poly1305 tag, replacing the 8-byte SipHash data-plane tag and
+  the obscure layer. That is **+40 bytes per packet**. A peer that does not use
+  the same `--cipher` and the same `--pad` cannot be decrypted and is rejected:
+  in port-range mode the control handshake refuses the mismatch; in normal mode
+  there is no negotiation, so mismatched packets are dropped and logged as
+  `auth_drop: plane=...`. Old or otherwise incompatible peers are always
+  rejected.
+
+The control plane stays SipHash-authenticated (not encryption) in both modes,
+and the test plane is unchanged.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--cipher <name>` | `none` | `none` (the default) = obfuscation + SipHash authentication only, not encryption. `xchacha20-ietf-poly1305` = real AEAD encryption on the data plane; must match on both ends. |
+| `--pad <0\|16\|32\|64>` | `0` | Pad the plaintext into a fixed-size bucket before AEAD. Requires `--cipher`; must match on both ends. Adds a 1-byte `pad_len` plus up to 64 authenticated pad bytes per packet. |
+| `--port-rotate-sec <sec>` | `0` | Client, port-range mode only. Every `<sec>` seconds the client advances the base of its round-robin data-port rotation within the server-advertised list. `0` disables rotation. |
+
+## Runnable examples
+
+Every example uses a throwaway 32-hex key; replace it with your own. `-k` accepts
+exactly 32 ASCII hex characters and nothing else.
+
+### Default mode (obfuscation + SipHash authentication, no encryption)
+
+```bash
+# server
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff
+
+# client
+./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+    -f20:10 -k 00112233445566778899aabbccddeeff
+```
+
+### Real AEAD encryption on both ends (`--cipher`)
+
+Both commands must carry the exact same `--cipher` value:
+
+```bash
+# server
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+
+# client
+./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+    -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+```
+
+### AEAD encryption + size-bucket padding (`--cipher --pad 32`)
+
+`--pad` requires `--cipher`, and the bucket must match on both ends.
+
+```bash
+# server
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 \
+    -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
+
+# client
+./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 -f20:10 \
+    -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
+```
+
+`--pad 32` without `--cipher` is a fatal startup error:
+
+```bash
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+    -k 00112233445566778899aabbccddeeff --pad 32
+# fatal: --pad 32 requires --cipher: a non-zero pad bucket is only meaningful in cipher mode
+```
+
+### Port rotation in port-range mode (`--port-rotate-sec`)
+
+`--port-rotate-sec` is client-side and only meaningful with `--port-range-mode`.
+It changes which advertised data port the round-robin send starts from; it never
+opens or closes sockets. The two ends may use different rotation values.
+
+```bash
+# server: control port 14096, data ports 15000-15015
+./speederv2 -s --port-range-mode --control-port 14096 \
+    --data-port-range 15000-15015 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+
+# client: rotate the send base every 30 seconds
+./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+    -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
+    --cipher xchacha20-ietf-poly1305 --pad 32 --port-rotate-sec 30
+```
+
+### Cipher/pad mismatch is refused
+
+In port-range mode the server refuses a HELLO whose capability differs from its
+own, so the client never installs a port list. Here the server runs the default
+(no `--cipher`) and the client asks for AEAD encryption:
+
+```bash
+# server: default mode, no --cipher
+./speederv2 -s --port-range-mode --control-port 14096 \
+    --data-port-range 15000-15015 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff
+
+# client: requests AEAD encryption -> handshake refused
+./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+    -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
+    --cipher xchacha20-ietf-poly1305
+```
+
+The two ends also have to agree on `--pad`: a server running `--pad 32` and a
+client running `--pad 64` (or no `--pad`) is the same kind of mismatch. In normal
+(non-port-range) mode there is no handshake, so a mismatched client is dropped
+packet by packet and each drop is logged as `auth_drop: plane=data ...`.
+
+
 # Improves all traffic with OpenVPN + UDPspeeder
 
 See [UDPspeeder + openvpn config guide](https://github.com/wangyu-/UDPspeeder/wiki/UDPspeeder-openvpn-config-guide).

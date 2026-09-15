@@ -33,11 +33,23 @@ Verification is a mix of an in-process C++ selftest (`./speederv2 --test-selftes
 
 `-f x:y` = send `y` redundant packets per `x` data packets. Common options must match on both sides. Full option list is in `main.cpp:print_help`.
 
+Add `--cipher xchacha20-ietf-poly1305` to **both** commands above to switch the data plane to AEAD encryption; add `--pad 32` to both to also bucket the plaintext. Neither flag is needed for the default obfuscation + SipHash mode.
+
 ## Key and authentication
 
 `-k`/`--key` takes **exactly 32 ASCII hex characters** (16 bytes, case-insensitive) and is **required in every network mode**; anything else fails before a socket is opened. Both ends must use the identical key.
 
 The key is a SipHash-2-4 authentication key. It authenticates packets on all four wire planes (ordinary data, port-range data, port-range control, test mode); a peer with a different key, including an old build that used a passphrase, is rejected fail-closed. It does **not** provide confidentiality. The existing obscure/XOR layer is obfuscation only: it changes the wire pattern, and its keystream is derived one-way from the PSK, but it is never encryption. Do not describe SipHash or XOR as encryption anywhere.
+
+## Data-plane encryption (V3)
+
+Encryption is opt-in and off by default. The default mode is obfuscation + SipHash authentication and does **not** encrypt.
+
+- `--cipher xchacha20-ietf-poly1305` turns on real data-plane AEAD (XChaCha20-Poly1305) via the vendored crypto in `crypto/`. `--cipher none` or omitting the flag keeps the default. Both ends must set the same value; a mismatch is refused at the port-range handshake, and in normal mode it surfaces as dropped, tamper-logged packets (`auth_drop: plane=...`).
+- In cipher mode the wire frame is `nonce(24) + ciphertext + tag(16)`, replacing the 8-byte SipHash data-plane tag and the obscure layer, i.e. **+40 bytes per packet**. Note this wording: only `--cipher` encrypts; the default authenticates and obfuscates.
+- `--pad <0|16|32|64>` pads the plaintext into a size bucket before AEAD. Non-zero requires `--cipher` (otherwise a fatal startup error) and must match on both ends; it adds a 1-byte `pad_len` plus up to 64 authenticated pad bytes.
+- `--port-rotate-sec <sec>` (client, port-range mode only; default 0 = off) advances the round-robin data-port send base every `<sec>` seconds within the server-advertised list. It never opens or closes sockets.
+- The control plane stays SipHash-authenticated (not encryption) at header version 3; the test plane stays version 1.
 
 ## Architecture
 
@@ -46,8 +58,9 @@ The program is a single process running one libev event loop, with two entry poi
 - `main.cpp` — argument parsing (`process_arg`), then dispatches to `tunnel_client_event_loop()` or `tunnel_server_event_loop()`.
 - `tunnel_client.cpp` / `tunnel_server.cpp` — the two roles. They register libev watchers on the local-listen fd and remote-send fd, and wire up callbacks for timers (FEC flush, delay manager, reporting).
 - `fec_manager.*` — the FEC scheduler. Accumulates incoming packets into a group, runs the Reed-Solomon encoder from `lib/rs.cpp` / `lib/fec.cpp` when the group fills or `--timeout` expires, and emits encoded packets. On receive, it reassembles groups and attempts correction. Supports both a single `-f x:y` and the fine-grained `-f x1:y1,x2:y2,...` form.
-- `packet.*` — per-packet framing: obscure, XOR obfuscation, SipHash-2-4 authentication (`auth.*`, `siphash.*`), sequence numbers, headers.
+- `packet.*` — per-packet framing: obscure, XOR obfuscation, SipHash-2-4 authentication (`auth.*`, `siphash.*`), sequence numbers, headers. In `--cipher` mode it instead builds the AEAD frame (`nonce + ciphertext + tag`) and, with `--pad`, the authenticated bucket-padding frame.
 - `auth.*` / `siphash.*` — SipHash-2-4 MAC over all four wire planes, keyed by the 32-hex PSK with a per-plane domain tweak; also derives the XOR obfuscation keystream one-way from the PSK.
+- `crypto/` — vendored Monocypher (XChaCha20-Poly1305 + BLAKE2b) plus `kdf.*` (domain-separated 32-byte key derivation from the PSK) and a thin wrapper. Compiled as C with `-x c` into per-target objects; never reformat the vendored source.
 - `control_proto.*` / `port_range_manager.*` — port-range control handshake (version 3), routing, and per-session bounded replay.
 - `delay_manager.*` — implements `--jitter` (random delay of first packet) and `--interval` (scattering a FEC group across a time interval to defend against burst loss).
 - `connection.*` — tracks client-side connection state keyed by source address, used on the server to route decoded packets back to the originating client.

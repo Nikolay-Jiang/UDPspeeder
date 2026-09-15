@@ -20,6 +20,32 @@ sides**. The key authenticates the tunnel; it does not encrypt, and a peer with 
 different key (including an old passphrase) is rejected. Replace the example key
 above with your own 32-hex value before use.
 
+### Encryption (optional, V3)
+
+The default commands above use obfuscation + SipHash authentication and do
+**not** encrypt. To turn on real data-plane encryption, add the same
+`--cipher xchacha20-ietf-poly1305` to **both** the server and the client command
+line, and the same `--pad` value if you use padding:
+
+```
+# server
+./speederv2 -s -l0.0.0.0:8855 -r 127.0.0.1:7777 -f20:10 \
+    -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+
+# client
+./speederv2 -c -l0.0.0.0:3333 -r 45.66.77.88:8855 -f20:10 \
+    -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+```
+
+A peer that does not use the same `--cipher` and `--pad` is rejected: in
+port-range mode the handshake refuses it, and in normal mode its packets are
+dropped and logged as `auth_drop: plane=...`. Cipher mode adds 40 bytes per
+packet (24-byte nonce + 16-byte tag, replacing the 8-byte SipHash data-plane
+tag). `--pad 32` adds a 1-byte `pad_len` plus up to 64 authenticated pad bytes
+and requires `--cipher`. OpenVPN's own encryption is independent of this
+switch; enabling `--cipher` does not change how OpenVPN encrypts the inner
+traffic.
+
 # openvpn config
 
 #### client side config

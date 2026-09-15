@@ -5,7 +5,7 @@
 
 我自己稳定用了几个月，用来加速美服的Brawl Stars和亚服的Mobile Legend，效果不错，加速前卡得几乎没法玩，加速后就没怎么卡过了。用来看视频也基本满速。
 
-最新的版本是v2版，在v1版的基础上增加了FEC功能，更省流量。如果你用的是v1版（路由器固件里自带的集成版很可能是v1版的），请看[v1版主页](/doc/README.zh-cn.v1.md)
+最新的版本是v3版，在v2版的基础上增加了可选的 XChaCha20-Poly1305 加密、定长填充和端口轮换功能；默认仍是混淆 + 认证，不加密。如果你用的是v1版（路由器固件里自带的集成版很可能是v1版的），请看[v1版主页](/doc/README.zh-cn.v1.md)
 
 配合vpn加速全流量的原理图(已测试支持VPN的有OpenVPN、L2TP、$\*\*\*VPN):
 
@@ -87,6 +87,98 @@ https://github.com/wangyu-/UDPspeeder/releases
 推荐使用`--mode 0`选项，否则你可能需要考虑MTU问题。
 
 这里推荐的参数是给日常/非游戏情况下使用的；玩游戏请用 [使用经验](https://github.com/wangyu-/UDPspeeder/wiki/使用经验) 里推荐的参数。
+
+### 加密与混淆
+
+UDPspeeder V3 把“混淆”和“加密”分得很清楚：
+
+- 默认模式只做混淆：对数据包做长度随机化和异或填充，并附加 8 字节 SipHash-2-4 认证标签。它改变抓包特征并认证每个包，但**不加密**数据，不提供机密性。
+- 真正的加密是可选项，默认关闭，只有两端都设置 `--cipher xchacha20-ietf-poly1305` 时才启用。此时数据面使用 XChaCha20-Poly1305：24 字节随机 nonce + 密文 + 16 字节 Poly1305 标签，替换原来的 8 字节 SipHash 标签和混淆层，每个包增加 **40 字节**。两端必须设置相同的 `--cipher` 和相同的 `--pad`，否则会被拒绝：port-range 模式下握手直接拒绝；普通模式没有协商，不匹配的包会被丢弃并记录为 `auth_drop: plane=...`。
+- 控制面始终使用 SipHash 认证（不是加密），测试面不变。
+
+| 选项 | 默认 | 含义 |
+|---|---|---|
+| `--cipher <name>` | `none` | `none`（默认）= 只做混淆 + SipHash 认证，不是加密。`xchacha20-ietf-poly1305` = 数据面真正的 AEAD 加密，两端必须一致。 |
+| `--pad <0\|16\|32\|64>` | `0` | 在 AEAD 之前把明文填充到固定大小的桶。需要 `--cipher`，两端必须一致。每个包增加 1 字节 `pad_len` 和最多 64 字节认证填充。 |
+| `--port-rotate-sec <sec>` | `0` | 仅客户端、port-range 模式。每 `<sec>` 秒在服务端下发的端口列表内推进轮询发送的起始端口。`0` 表示关闭。 |
+
+#### 可运行示例
+
+以下示例使用固定的 32 位十六进制测试 key；请替换为你自己的 key。`-k` 只接受正好 32 个 ASCII 十六进制字符。
+
+默认模式（混淆 + SipHash 认证，不加密）：
+
+```bash
+# 服务端
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff
+
+# 客户端
+./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+    -f20:10 -k 00112233445566778899aabbccddeeff
+```
+
+两端都启用真正的 AEAD 加密（`--cipher`，两端必须一致）：
+
+```bash
+# 服务端
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+
+# 客户端
+./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+    -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+```
+
+AEAD 加密 + 定长桶填充（`--cipher --pad 32`，两端必须一致）：
+
+```bash
+# 服务端
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 \
+    -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
+
+# 客户端
+./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 -f20:10 \
+    -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
+```
+
+`--pad 32` 不带 `--cipher` 会在启动时报错退出：
+
+```bash
+./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+    -k 00112233445566778899aabbccddeeff --pad 32
+# fatal: --pad 32 requires --cipher
+```
+
+port-range 模式下按 `--port-rotate-sec` 轮换发送端口（仅客户端）：
+
+```bash
+# 服务端：控制端口 14096，数据端口 15000-15015
+./speederv2 -s --port-range-mode --control-port 14096 \
+    --data-port-range 15000-15015 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
+
+# 客户端：每 30 秒推进一次轮询起始端口
+./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+    -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
+    --cipher xchacha20-ietf-poly1305 --pad 32 --port-rotate-sec 30
+```
+
+cipher/pad 不匹配会被拒绝。port-range 模式下服务端在握手时就拒绝能力不一致的 HELLO，客户端不会安装端口列表：
+
+```bash
+# 服务端：默认模式，不带 --cipher
+./speederv2 -s --port-range-mode --control-port 14096 \
+    --data-port-range 15000-15015 -r 127.0.0.1:7777 \
+    -f20:10 -k 00112233445566778899aabbccddeeff
+
+# 客户端：请求 AEAD 加密 -> 握手被拒绝
+./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+    -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
+    --cipher xchacha20-ietf-poly1305
+```
+
+`--pad` 也必须一致：服务端 `--pad 32` 而客户端 `--pad 64`（或没有 `--pad`）属于同一种不匹配。普通模式没有握手，不匹配的包会被逐个丢弃并记录为 `auth_drop: plane=data ...`。
 
 ##### 提示
 
