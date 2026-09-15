@@ -34,15 +34,24 @@
         }                                                                      \
     } while (0)
 
+// The capability this process advertises, exactly as the real client/server
+// serialize it from the CLI config.
+static ctrl_cap_t control_local_cap() {
+    ctrl_cap_t cap = {};
+    cap.cipher     = (uint8_t)g_crypto_cfg.cipher;
+    cap.pad_bucket = (uint8_t)g_crypto_cfg.pad_bucket;
+    return cap;
+}
+
 // Build a v3 HELLO_ACK with an explicit nonce so acceptance is deterministic:
 // ctrl_encode draws a random nonce, which would make the positive control
 // (and therefore the whole matrix) flaky if that draw ever hit 0.
 //
 // Payload layout matches the server: ack_hdr + port_count*2 ports + the 2-byte
-// capability the server echoes. The cap is emitted from the local config (zero
-// by default under --test-selftest), exactly as the real server does.
+// capability the server echoes. `cap` is explicit so a caller can forge the
+// server-echoed capability independently of the local config.
 static int control_build_hello_ack(char *out, const uint8_t session[16],
-                                   uint16_t port, uint64_t nonce) {
+                                   uint16_t port, uint64_t nonce, ctrl_cap_t cap) {
     ctrl_hdr_t hdr = {};
     hdr.version      = 3;
     hdr.msg_type     = CTRL_HELLO_ACK;
@@ -56,10 +65,6 @@ static int control_build_hello_ack(char *out, const uint8_t session[16],
     ack.heartbeat_interval_ms = 1000;
     memcpy(out + CTRL_HDR_LEN, &ack, sizeof(ack));
     memcpy(out + CTRL_HDR_LEN + sizeof(ack), &port, 2);
-
-    ctrl_cap_t cap = {};
-    cap.cipher     = (uint8_t)g_crypto_cfg.cipher;
-    cap.pad_bucket = (uint8_t)g_crypto_cfg.pad_bucket;
     memcpy(out + CTRL_HDR_LEN + sizeof(ack) + 2, &cap, sizeof(cap));
 
     int body = (int)(CTRL_HDR_LEN + sizeof(ack) + 2 + sizeof(cap));
@@ -233,7 +238,8 @@ static void control_client_checks(int &checks, int &failures) {
 
     const uint16_t port = 25001;
     char ack[CTRL_HDR_LEN + sizeof(ctrl_hello_ack_hdr_t) + 2 + 2 + CTRL_MAC_LEN];
-    int ack_len = control_build_hello_ack(ack, g_session_id, port, 424242);
+    int ack_len = control_build_hello_ack(ack, g_session_id, port, 424242,
+                                          control_local_cap());
     auto deliver = [&](int fd, const char *packet, int len) {
         CTRLCHECK(sendto(fd, packet, len, 0, (sockaddr *)&client_addr.inner,
                          client_addr.get_len()) == len);
@@ -248,13 +254,40 @@ static void control_client_checks(int &checks, int &failures) {
     deliver(wrong_ip_fd, ack, ack_len);
     CTRLCHECK(g_ctrl_state == CTRL_HANDSHAKING && g_hello_retry_sec == 7 &&
               !port_range_mgr.ready);
+
+    // Case 7 (G4/G5): a HELLO_ACK whose echoed capability differs from the
+    // client's own config is refused before any port is installed. Each field
+    // is checked independently: a different cipher and a different pad bucket
+    // must each refuse, because the server echoes its own config and only an
+    // exact match may install ports.
+    {
+        ctrl_cap_t cap = control_local_cap();
+        cap.cipher = (uint8_t)(cap.cipher == CRYPTO_CIPHER_NONE
+                                   ? CRYPTO_CIPHER_XCHACHA20_IETF_POLY1305
+                                   : CRYPTO_CIPHER_NONE);
+        ack_len = control_build_hello_ack(ack, g_session_id, port, 424240, cap);
+        deliver(server_fd, ack, ack_len);
+        CTRLCHECK(g_ctrl_state == CTRL_HANDSHAKING && g_hello_retry_sec == 7 &&
+                  !port_range_mgr.ready);
+
+        cap = control_local_cap();
+        cap.pad_bucket = (uint8_t)(cap.pad_bucket == 0 ? 16 : 0);
+        ack_len = control_build_hello_ack(ack, g_session_id, port, 424241, cap);
+        deliver(server_fd, ack, ack_len);
+        CTRLCHECK(g_ctrl_state == CTRL_HANDSHAKING && g_hello_retry_sec == 7 &&
+                  !port_range_mgr.ready);
+    }
+
     // Positive control: the identical bytes from the configured server are
-    // accepted, so the two drops above were the source gate, not the packet.
+    // accepted, so the drops above were the source/session/capability gates,
+    // not the packet.
+    ack_len = control_build_hello_ack(ack, g_session_id, port, 424242,
+                                      control_local_cap());
     deliver(server_fd, ack, ack_len);
     CTRLCHECK(g_ctrl_state == CTRL_RUNNING && g_hello_retry_sec == 1 &&
               port_range_mgr.ready && port_range_mgr.ports.size() == 1);
 
-    // Case 7: a valid MAC from the right source but with a mismatched
+    // Case 8: a valid MAC from the right source but with a mismatched
     // session_id is rejected; the real session id round-trips.
     uint8_t wrong_session[16];
     memcpy(wrong_session, g_session_id, 16);
@@ -262,11 +295,13 @@ static void control_client_checks(int &checks, int &failures) {
     g_ctrl_state = CTRL_HANDSHAKING;
     g_hello_retry_sec = 7;
     port_range_mgr.ready = false;
-    ack_len = control_build_hello_ack(ack, wrong_session, port, 424243);
+    ack_len = control_build_hello_ack(ack, wrong_session, port, 424243,
+                                      control_local_cap());
     deliver(server_fd, ack, ack_len);
     CTRLCHECK(g_ctrl_state == CTRL_HANDSHAKING && g_hello_retry_sec == 7 &&
               !port_range_mgr.ready);
-    ack_len = control_build_hello_ack(ack, g_session_id, port, 424244);
+    ack_len = control_build_hello_ack(ack, g_session_id, port, 424244,
+                                      control_local_cap());
     deliver(server_fd, ack, ack_len);
     CTRLCHECK(g_ctrl_state == CTRL_RUNNING && g_hello_retry_sec == 1 &&
               port_range_mgr.ready);
@@ -277,6 +312,154 @@ static void control_client_checks(int &checks, int &failures) {
     close(wrong_port_fd);
     close(wrong_ip_fd);
     close(client_fd);
+}
+
+// ---- case 9 (G4/G11): normal-mode (no handshake) cipher/pad mismatch drops ----
+//
+// Outside port-range mode there is no negotiation, so a config mismatch cannot
+// be refused up front: it surfaces as an authentication failure on the data
+// plane. The pad bucket is bound as AEAD associated data (G1), so changing only
+// the bucket fails verification too. Each mismatch must both drop and reach
+// auth_drop_note, which is what emits the todo-8 "auth_drop: plane=data" line.
+static void control_normal_mode_mismatch_checks(int &checks, int &failures) {
+    crypto_cfg_t saved_cfg = g_crypto_cfg;
+    const int saved_obscure = disable_obscure, saved_xor = disable_xor;
+    uint8_t saved_key[16];
+    char saved_xor_key[sizeof(key_string)];
+    memcpy(saved_key, g_psk, sizeof(saved_key));
+    memcpy(saved_xor_key, key_string, sizeof(saved_xor_key));
+
+    uint8_t psk[16];
+    for (int i = 0; i < 16; i++) psk[i] = (uint8_t)(0x50 + i);
+    auth_key_set(psk);
+    disable_obscure = disable_xor = 0;
+
+    char shard[160];
+    for (int i = 0; i < (int)sizeof(shard); i++) shard[i] = (char)(i * 17);
+    char wire[buf_len], received[buf_len];
+
+    // (a) cipher-scheme mismatch. Default sender -> cipher receiver, and the
+    //     drop must have reached the data-plane tamper counter.
+    g_crypto_cfg.cipher = CRYPTO_CIPHER_NONE;
+    g_crypto_cfg.pad_bucket = 0;
+    memcpy(wire, shard, sizeof(shard));
+    int wire_len = sizeof(shard);
+    CTRLCHECK(do_cook(wire, wire_len) == 0);
+    g_crypto_cfg.cipher = CRYPTO_CIPHER_XCHACHA20_IETF_POLY1305;
+    u64_t before = g_auth_drop.data;
+    memcpy(received, wire, wire_len);
+    int len = wire_len;
+    CTRLCHECK(de_cook(received, len) != 0);
+    CTRLCHECK(g_auth_drop.data == before + 1);
+
+    // (b) cipher-scheme mismatch, reverse. Cipher sender -> default receiver.
+    memcpy(wire, shard, sizeof(shard));
+    wire_len = sizeof(shard);
+    CTRLCHECK(do_cook(wire, wire_len) == 0);
+    g_crypto_cfg.cipher = CRYPTO_CIPHER_NONE;
+    g_crypto_cfg.pad_bucket = 0;
+    before = g_auth_drop.data;
+    memcpy(received, wire, wire_len);
+    len = wire_len;
+    CTRLCHECK(de_cook(received, len) != 0);
+    CTRLCHECK(g_auth_drop.data == before + 1);
+
+    // (c) differing pad bucket. Same cipher on both ends, so only the AEAD
+    //     associated data differs and the tag must fail to verify.
+    g_crypto_cfg.cipher = CRYPTO_CIPHER_XCHACHA20_IETF_POLY1305;
+    g_crypto_cfg.pad_bucket = 16;
+    memcpy(wire, shard, sizeof(shard));
+    wire_len = sizeof(shard);
+    CTRLCHECK(do_cook(wire, wire_len) == 0);
+    g_crypto_cfg.pad_bucket = 32;
+    before = g_auth_drop.data;
+    memcpy(received, wire, wire_len);
+    len = wire_len;
+    CTRLCHECK(de_cook(received, len) != 0);
+    CTRLCHECK(g_auth_drop.data == before + 1);
+
+    // Positive control: matching cipher and pad round-trip, so the drops above
+    // are the mismatch and not a broken cipher path.
+    g_crypto_cfg.pad_bucket = 16;
+    memcpy(wire, shard, sizeof(shard));
+    wire_len = sizeof(shard);
+    CTRLCHECK(do_cook(wire, wire_len) == 0);
+    memcpy(received, wire, wire_len);
+    len = wire_len;
+    CTRLCHECK(de_cook(received, len) == 0 && len == (int)sizeof(shard) &&
+                  memcmp(received, shard, sizeof(shard)) == 0);
+
+    disable_obscure = saved_obscure;
+    disable_xor = saved_xor;
+    memcpy(g_psk, saved_key, sizeof(saved_key));
+    memcpy(key_string, saved_xor_key, sizeof(saved_xor_key));
+    g_crypto_cfg = saved_cfg;
+}
+
+// ---- case 10 (G11): default-mode (cipher=none, pad=0) wire compatibility ----
+//
+// V3 must not perturb the default data frame: it stays
+// [shard][SipHash-8][obscure(iv+1)] XOR key_string, exactly the pre-V3 shape.
+// Pin the overhead constant and the tag position so a V3 change that leaked
+// AEAD/pad bytes into the default path, or moved the tag, is caught here.
+static void control_default_wire_compat_checks(int &checks, int &failures) {
+    crypto_cfg_t saved_cfg = g_crypto_cfg;
+    const int saved_obscure = disable_obscure, saved_xor = disable_xor;
+    const int saved_iv_min = iv_min, saved_iv_max = iv_max;
+    uint8_t saved_key[16];
+    char saved_xor_key[sizeof(key_string)];
+    memcpy(saved_key, g_psk, sizeof(saved_key));
+    memcpy(saved_xor_key, key_string, sizeof(saved_xor_key));
+
+    uint8_t psk[16];
+    for (int i = 0; i < 16; i++) psk[i] = (uint8_t)(0x60 + i);
+    auth_key_set(psk);
+
+    g_crypto_cfg.cipher = CRYPTO_CIPHER_NONE;
+    g_crypto_cfg.pad_bucket = 0;
+    g_crypto_cfg.rotate_sec = 0;
+
+    char shard[128];
+    for (int i = 0; i < (int)sizeof(shard); i++) shard[i] = (char)(i * 43);
+
+    // (1) Default overhead is the pre-V3 formula: 8-byte SipHash tag plus the
+    //     maximum obscure trailer (iv_max + 1). No AEAD/pad bytes.
+    iv_min = iv_max = 32;
+    int default_overhead = SIPHASH_TAG_LEN + iv_max + 1;
+    CTRLCHECK(cook_overhead() == default_overhead);
+
+    // (2) With obscure/XOR frozen, the wire is exactly shard + 8 and the
+    //     trailer is the DOMAIN_DATA tag over the shard: the pre-V3 position.
+    disable_obscure = disable_xor = 1;
+    char wire[buf_len];
+    memcpy(wire, shard, sizeof(shard));
+    int wire_len = sizeof(shard);
+    CTRLCHECK(do_cook(wire, wire_len) == 0 &&
+                  wire_len == (int)sizeof(shard) + SIPHASH_TAG_LEN);
+    uint8_t tag[SIPHASH_TAG_LEN];
+    auth_tag(DOMAIN_DATA, (const uint8_t *)shard, sizeof(shard), tag);
+    CTRLCHECK(memcmp(wire + sizeof(shard), tag, SIPHASH_TAG_LEN) == 0);
+
+    // (3) With the real layers on and iv fixed, the wire is shard + 41 and
+    //     still round-trips.
+    disable_obscure = disable_xor = 0;
+    memcpy(wire, shard, sizeof(shard));
+    wire_len = sizeof(shard);
+    CTRLCHECK(do_cook(wire, wire_len) == 0 &&
+                  wire_len == (int)sizeof(shard) + default_overhead);
+    char received[buf_len];
+    memcpy(received, wire, wire_len);
+    int len = wire_len;
+    CTRLCHECK(de_cook(received, len) == 0 && len == (int)sizeof(shard) &&
+                  memcmp(received, shard, sizeof(shard)) == 0);
+
+    iv_min = saved_iv_min;
+    iv_max = saved_iv_max;
+    disable_obscure = saved_obscure;
+    disable_xor = saved_xor;
+    memcpy(g_psk, saved_key, sizeof(saved_key));
+    memcpy(key_string, saved_xor_key, sizeof(saved_xor_key));
+    g_crypto_cfg = saved_cfg;
 }
 
 // Called from test_mode_selftest() (see test_mode.cpp). Returns the number of
@@ -309,6 +492,8 @@ int control_plane_selftest(int &checks, int &failures) {
     control_protocol_checks(checks, failures);
     control_replay_checks(checks, failures);
     control_client_checks(checks, failures);
+    control_normal_mode_mismatch_checks(checks, failures);
+    control_default_wire_compat_checks(checks, failures);
 
     g_ctrl_state = saved_state;
     g_ctrl_fd = saved_fd;
