@@ -110,6 +110,9 @@ test-mode: all
 test-port-range: all
 	bash tests/smoke_port_range.sh ./${NAME}
 
+test-examples: all
+	bash tests/smoke_examples.sh ./${NAME}
+
 # Sanitizer build. Dynamic link only: no -static here (unlike `all`), because
 # ASan/UBSan cannot be combined with a fully static libc on this target.
 sanitize: git_version ${CRYPTO_OBJS_SAN}
