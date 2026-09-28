@@ -1,0 +1,23 @@
+# Build artifacts and generated files
+/speederv3
+/speederv3-sanitize
+/speederv3_*
+/speederv2
+/speederv2-sanitize
+/speederv2_*
+/speederv2-*
+/git_version.h
+/version.txt
+/core
+/*.tar.gz
+*.o
+*.d
+
+# Local agent / tooling state (not part of the project)
+/.omo/
+/.superpowers/
+/.claude/
+/.codegraph/
+
+# Local historical review snapshot (superseded by later fixes)
+/docs/code-review-2026-06-10.md
