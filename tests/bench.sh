@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bench.sh — reproducible authenticated-tunnel benchmark harness
 #
-# Runs a real speederv2 tunnel (client + server + UDP echo) over loopback
+# Runs a real speederv3 tunnel (client + server + UDP echo) over loopback
 # across a compact matrix that varies PPS, packet size, FEC on/off, delay and
 # packet loss, then writes a machine-readable metrics summary containing
 # throughput, CPU, RSS, tail latency and FEC recovery.
@@ -38,7 +38,7 @@
 # and the same matrix signature; otherwise it says so and skips the gate.
 #
 # Usage:
-#   bash tests/bench.sh [/path/to/speederv2] [--runs N] [--out-dir DIR]
+#   bash tests/bench.sh [/path/to/speederv3] [--runs N] [--out-dir DIR]
 #                       [--configs NAME[,NAME...]]
 #
 #   --runs N        run the whole matrix N times in this invocation and
@@ -98,7 +98,7 @@ usage() {
 }
 
 # ---------------------------------------------------------------- arguments
-BINARY="./speederv2"
+BINARY="./speederv3"
 if [[ $# -gt 0 && "$1" != -* ]]; then
     BINARY="$1"
     shift
@@ -183,7 +183,7 @@ BASELINE_CFG="${CONFIGS[0]}"
 # executable, so the binary is also asked to identify itself.
 if [[ ! -e "$BINARY" ]]; then
     die "binary not found: $BINARY
-       usage: bash tests/bench.sh [/path/to/speederv2] [--runs N] [--out-dir DIR] [--configs LIST]"
+       usage: bash tests/bench.sh [/path/to/speederv3] [--runs N] [--out-dir DIR] [--configs LIST]"
 fi
 if [[ ! -x "$BINARY" ]]; then
     die "binary is not executable: $BINARY"

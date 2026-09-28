@@ -12,12 +12,12 @@
 #          is opened (server, port-range client).
 # Round 6: ...and is NOT refused for a test-mode prober, which opens one.
 #
-# Usage: bash tests/smoke_ipv6.sh [/path/to/speederv2]
+# Usage: bash tests/smoke_ipv6.sh [/path/to/speederv3]
 # Exit 0 on pass or on a loud skip; non-zero on failure.
 
 set -euo pipefail
 
-BINARY="${1:-./speederv2}"
+BINARY="${1:-./speederv3}"
 PYTHON="${PYTHON:-python3}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

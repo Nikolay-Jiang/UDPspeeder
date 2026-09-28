@@ -6,13 +6,13 @@
 #   Round 2: --random-drop 1500 (≈15% loss) with -f20:10 FEC → expect ≥99%
 #
 # Usage:
-#   bash tests/smoke.sh [/path/to/speederv2]
+#   bash tests/smoke.sh [/path/to/speederv3]
 #
 # Exit 0 on pass, non-zero on failure.
 
 set -euo pipefail
 
-BINARY="${1:-./speederv2}"
+BINARY="${1:-./speederv3}"
 PYTHON="${PYTHON:-python3}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TIMEOUT_CMD="timeout"

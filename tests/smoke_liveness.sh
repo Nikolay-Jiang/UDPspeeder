@@ -4,7 +4,7 @@
 # Plan: .omo/plans/udpspeeder-siphash-hardening.md todo 20 (findings 22, 24, 25).
 #
 # Scenario: a healthy authenticated tunnel (udp_echo.py app flow) runs for
-# SMOKE_LIVENESS_SECS (default 60) while a concurrent wrong-key ./speederv2
+# SMOKE_LIVENESS_SECS (default 60) while a concurrent wrong-key ./speederv3
 # client is flooded through the same server receive socket. Nothing in the
 # production send/drain path is modified by this test.
 #
@@ -31,7 +31,7 @@
 #      keep arriving at >= 1 per 1.7s on average.
 #
 # Usage:
-#   bash tests/smoke_liveness.sh [/path/to/speederv2]
+#   bash tests/smoke_liveness.sh [/path/to/speederv3]
 #
 # Env:
 #   SMOKE_LIVENESS_SECS  window length; default 60. Values < 60 are a debug
@@ -43,7 +43,7 @@
 
 set -uo pipefail
 
-BIN="${1:-./speederv2}"
+BIN="${1:-./speederv3}"
 PYTHON="${PYTHON:-python3}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SECS="${SMOKE_LIVENESS_SECS:-60}"

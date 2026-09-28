@@ -4,7 +4,7 @@
 #      `make sanitize` is the supported sanitizer route
 
 cmake_minimum_required(VERSION 3.7)
-project(speederv2)
+project(speederv3)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_CXX_STANDARD 11)
@@ -37,10 +37,10 @@ set(SOURCE_FILES
 )
 set(CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-unused-variable -Wno-unused-parameter -Wno-missing-field-initializers -O2 -g -fsanitize=address,undefined")
 
-#target_include_directories(speederv2 PRIVATE .)
+#target_include_directories(speederv3 PRIVATE .)
 #set(CMAKE_LINK_LIBRARY_FLAG "-lrt")
-add_executable(speederv2 ${SOURCE_FILES})
-target_link_libraries(speederv2 rt)
-target_link_libraries(speederv2 pthread)
+add_executable(speederv3 ${SOURCE_FILES})
+target_link_libraries(speederv3 rt)
+target_link_libraries(speederv3 pthread)
 include_directories(SYSTEM "libev")
 include_directories(".")

@@ -4,7 +4,7 @@ cc_amd64=/toolchains/lede-sdk-17.01.2-x86-64_gcc-5.4.0_musl-1.1.16.Linux-x86_64/
 
 
 SOURCES=main.cpp log.cpp common.cpp lib/fec.cpp lib/rs.cpp crc32/Crc32.cpp packet.cpp delay_manager.cpp fd_manager.cpp connection.cpp fec_manager.cpp misc.cpp tunnel_client.cpp tunnel_server.cpp my_ev.cpp siphash.cpp auth.cpp crypto/kdf.cpp control_proto.cpp port_range_manager.cpp test_mode.cpp test_mode_net.cpp -isystem libev
-NAME=speederv2
+NAME=speederv3
 
 # Vendored crypto is C, not C++. The .c files stay OUT of SOURCES (which the
 # C++ driver compiles) to avoid duplicate symbols; every link target compiles
@@ -82,7 +82,7 @@ amd64:git_version ${CRYPTO_OBJS_AMD64}
 	${cc_amd64}   -o ${NAME}_$@    -I. ${SOURCES} ${CRYPTO_OBJS_AMD64} ${FLAGS} -lrt -static -O2 -lgcc_eh -ggdb
 else
 amd64:git_version
-	@echo "SKIP: amd64 cross-compiler not found at ${cc_amd64}; skipping speederv2_amd64"
+	@echo "SKIP: amd64 cross-compiler not found at ${cc_amd64}; skipping speederv3_amd64"
 endif
 
 ifeq (${HAVE_X86},yes)
@@ -90,7 +90,7 @@ x86:git_version ${CRYPTO_OBJS_X86}
 	${cc_x86}   -o ${NAME}_$@      -I. ${SOURCES} ${CRYPTO_OBJS_X86} ${FLAGS} -lrt -static -O2 -lgcc_eh -ggdb
 else
 x86:git_version          #to build this you need 'g++-multilib' installed
-	@echo "SKIP: x86 cross-compiler not found at ${cc_x86}; skipping speederv2_x86"
+	@echo "SKIP: x86 cross-compiler not found at ${cc_x86}; skipping speederv3_x86"
 endif
 
 

@@ -37,12 +37,12 @@
 # addition to its S1/S2 (and, for round 6, S3/S4) phases. The whole script
 # (selftest + 6 full prober runs, one per Round 2-7) takes roughly 3 minutes.
 #
-# Usage: bash tests/smoke_test_mode.sh [/path/to/speederv2]
+# Usage: bash tests/smoke_test_mode.sh [/path/to/speederv3]
 # Exit 0 on pass, non-zero on failure.
 
 set -euo pipefail
 
-BINARY="${1:-./speederv2}"
+BINARY="${1:-./speederv3}"
 if [[ ! -x "$BINARY" ]]; then
     echo "ERROR: binary not found or not executable: $BINARY"
     exit 1
@@ -56,7 +56,7 @@ KEY="fedcba9876543210fedcba9876543210"
 # Floor for the parent-harness check count emitted as
 # "test_mode selftest: N checks, F failures". Set by the exact procedure in the
 # plan (todo 15), run on a build where todos 1/6/13 have landed:
-#   N=$(./speederv2 --test-selftest 2>&1 | sed -n 's/.*selftest: \([0-9]*\) checks.*/\1/p')
+#   N=$(./speederv3 --test-selftest 2>&1 | sed -n 's/.*selftest: \([0-9]*\) checks.*/\1/p')
 # A future change that silently deletes checks would otherwise keep passing.
 # When checks are added, raise this literal deliberately; never lower it.
 EXPECTED_SELFTEST_MIN=194

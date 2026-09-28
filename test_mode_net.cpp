@@ -287,7 +287,7 @@ static int hello_pl_check(const uint8_t *pl, int pl_len, char *reason, size_t re
     if (pl_len < TEST_HELLO_PL_LEN) {
         snprintf(reason, reason_cap,
                  "HELLO payload is %d bytes, expected %d -- the two ends are running "
-                 "different speederv2 builds. use the same build on both.",
+                 "different speederv3 builds. use the same build on both.",
                  pl_len, TEST_HELLO_PL_LEN);
         return TEST_REJECT_VERSION;
     }

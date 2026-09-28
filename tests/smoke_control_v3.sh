@@ -15,10 +15,10 @@
 # Every negative has a positive control, so a server that simply refused or
 # dropped everything would fail the suite instead of passing it.
 #
-# Usage: bash tests/smoke_control_v3.sh [/path/to/speederv2]
+# Usage: bash tests/smoke_control_v3.sh [/path/to/speederv3]
 set -euo pipefail
 
-BIN="${1:-./speederv2}"
+BIN="${1:-./speederv3}"
 PYTHON="${PYTHON:-python3}"
 KEY="00112233445566778899aabbccddeeff"
 CIPHER="xchacha20-ietf-poly1305"

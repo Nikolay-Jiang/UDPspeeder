@@ -9,7 +9,7 @@
 # makes a green run lie.
 set -euo pipefail
 
-BIN="${1:-./speederv2}"
+BIN="${1:-./speederv3}"
 PYTHON="${PYTHON:-python3}"
 
 if [ ! -x "$BIN" ]; then
@@ -70,7 +70,7 @@ ECHO_PID=$!
 
 sleep 0.2
 
-# --- speederv2 server ---
+# --- speederv3 server ---
 "$BIN" -s \
     --port-range-mode \
     --control-port $CTRL_PORT \
@@ -82,7 +82,7 @@ SERVER_PID=$!
 
 sleep 0.5
 
-# --- speederv2 client ---
+# --- speederv3 client ---
 "$BIN" -c \
     --port-range-mode \
     --control-host "127.0.0.1:${CTRL_PORT}" \

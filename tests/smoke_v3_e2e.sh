@@ -27,7 +27,7 @@
 # and wrong-key floods. All ports are randomized below the ephemeral range.
 #
 # Usage:
-#   bash tests/smoke_v3_e2e.sh [/path/to/speederv2]
+#   bash tests/smoke_v3_e2e.sh [/path/to/speederv3]
 #
 # Env:
 #   SMOKE_E2E_KEEP=1    keep the log directory for inspection.
@@ -43,7 +43,7 @@
 #       missing (loud SKIP, never a silent pass).
 set -uo pipefail
 
-BIN="${1:-./speederv2}"
+BIN="${1:-./speederv3}"
 PYTHON="${PYTHON:-python3}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
