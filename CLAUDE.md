@@ -4,31 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-UDPspeeder V3 (`speederv2`) — a UDP tunnel that reduces packet loss on lossy links by applying Reed-Solomon Forward Error Correction, optionally combined with a UDP-based VPN to accelerate arbitrary traffic. C++11, event-loop based (libev), Linux x86 / x86_64 only.
+UDPspeeder V3 (`speederv3`) — a UDP tunnel that reduces packet loss on lossy links by applying Reed-Solomon Forward Error Correction, optionally combined with a UDP-based VPN to accelerate arbitrary traffic. C++11, event-loop based (libev), Linux x86 / x86_64 only.
 
 ## Build
 
 The canonical build system is `makefile`. CMake exists only to generate `compile_commands.json` for clangd (see `CMakeLists.txt` note).
 
 Common targets:
-- `make` — native Linux static build with `-O2` (produces `speederv2`).
+- `make` — native Linux static build with `-O2` (produces `speederv3`).
 - `make debug` — defines `MY_DEBUG`, no `-O2`, includes `-Wformat-nonliteral`. Use this when iterating on protocol/state logic.
-- `make fast` — optimized build with debug symbols, no `MY_DEBUG`.
+- `make fast` — debug-symbol build with no `MY_DEBUG`. Note `OPT` is empty for it, so it has no `-O2` and is *not* optimized despite the name.
 - `make amd64`, `make x86` — static cross-compiles via the bundled OpenWRT x86 musl toolchains; paths are hard-coded at the top of the makefile and must be adjusted for your environment.
 - `make release` — builds all cross targets and tarballs them.
 - `make clean` — removes binaries and `git_version.h`.
 
-Every target depends on `git_version`, which regenerates `git_version.h` from `git rev-parse HEAD`. That file is consumed by `main.cpp`'s `--version`/help output; don't commit it.
+Every target depends on `git_version`, which regenerates `git_version.h` from `git rev-parse HEAD`. That file is consumed by `main.cpp`'s help output (`-h`/`--help`); there is no `--version` flag. Don't commit it.
 
-Verification is a mix of an in-process C++ selftest (`./speederv2 --test-selftest`, no network) and shell smoke suites under `tests/`. The makefile exposes `test` (selftest + base IPv4 smoke), `test-selftest`, `test-mode`, `test-port-range`, and `sanitize` (ASan/UBSan build that reruns the selftest and smoke test). `AGENTS.md` has the full matrix. `--random-drop` still simulates loss locally, in units of `0.01%`.
+Verification is a mix of an in-process C++ selftest (`./speederv3 --test-selftest`, no network) and shell smoke suites under `tests/`. The makefile exposes `test` (selftest + base IPv4 smoke), `test-selftest`, `test-mode`, `test-port-range`, and `sanitize` (ASan/UBSan build that reruns the selftest and smoke test). `AGENTS.md` has the full matrix. `--random-drop` still simulates loss locally, in units of `0.01%`.
 
 ## Running
 
 ```
 # server:
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 -k 00112233445566778899aabbccddeeff
 # client:
-./speederv2 -c -l0.0.0.0:3333 -r<server_ip>:4096 -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -c -l0.0.0.0:3333 -r<server_ip>:4096 -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 `-f x:y` = send `y` redundant packets per `x` data packets. Common options must match on both sides. Full option list is in `main.cpp:print_help`.

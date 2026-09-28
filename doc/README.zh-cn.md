@@ -70,10 +70,10 @@ https://github.com/wangyu-/UDPspeeder/releases
 假设你有一个server，ip为44.55.66.77，有一个服务监听在udp 7777端口。 假设你需要加速本地到44.55.66.77:7777的流量。
 ```
 在server端运行:
-./speederv2 -s -l0.0.0.0:4096 -r127.0.0.1:7777  -f20:10 -k 00112233445566778899aabbccddeeff --mode 0
+./speederv3 -s -l0.0.0.0:4096 -r127.0.0.1:7777  -f20:10 -k 00112233445566778899aabbccddeeff --mode 0
 
 在client端运行:
-./speederv2 -c -l0.0.0.0:3333 -r44.55.66.77:4096 -f20:10 -k 00112233445566778899aabbccddeeff --mode 0
+./speederv3 -c -l0.0.0.0:3333 -r44.55.66.77:4096 -f20:10 -k 00112233445566778899aabbccddeeff --mode 0
 ```
 
 现在client和server之间建立起了tunnel。想要连接44.55.66.77:7777，只需要连接 127.0.0.1:3333。来回的所有的udp流量会被加速。
@@ -110,11 +110,11 @@ UDPspeeder V3 把“混淆”和“加密”分得很清楚：
 
 ```bash
 # 服务端
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff
 
 # 客户端
-./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+./speederv3 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
     -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
@@ -122,11 +122,11 @@ UDPspeeder V3 把“混淆”和“加密”分得很清楚：
 
 ```bash
 # 服务端
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 
 # 客户端
-./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+./speederv3 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
     -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 ```
 
@@ -134,18 +134,18 @@ AEAD 加密 + 定长桶填充（`--cipher --pad 32`，两端必须一致）：
 
 ```bash
 # 服务端
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 \
     -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
 
 # 客户端
-./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 -f20:10 \
+./speederv3 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 -f20:10 \
     -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
 ```
 
 `--pad 32` 不带 `--cipher` 会在启动时报错退出：
 
 ```bash
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
     -k 00112233445566778899aabbccddeeff --pad 32
 # fatal: --pad 32 requires --cipher
 ```
@@ -154,12 +154,12 @@ port-range 模式下按 `--port-rotate-sec` 轮换发送端口（仅客户端）
 
 ```bash
 # 服务端：控制端口 14096，数据端口 15000-15015
-./speederv2 -s --port-range-mode --control-port 14096 \
+./speederv3 -s --port-range-mode --control-port 14096 \
     --data-port-range 15000-15015 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 
 # 客户端：每 30 秒推进一次轮询起始端口
-./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+./speederv3 -c --port-range-mode --control-host 44.55.66.77:14096 \
     -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
     --cipher xchacha20-ietf-poly1305 --pad 32 --port-rotate-sec 30
 ```
@@ -168,12 +168,12 @@ cipher/pad 不匹配会被拒绝。port-range 模式下服务端在握手时就�
 
 ```bash
 # 服务端：默认模式，不带 --cipher
-./speederv2 -s --port-range-mode --control-port 14096 \
+./speederv3 -s --port-range-mode --control-port 14096 \
     --data-port-range 15000-15015 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff
 
 # 客户端：请求 AEAD 加密 -> 握手被拒绝
-./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+./speederv3 -c --port-range-mode --control-host 44.55.66.77:14096 \
     -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
     --cipher xchacha20-ietf-poly1305
 ```
@@ -191,56 +191,19 @@ https://github.com/wangyu-/udp2raw-tunnel
 # 进阶操作说明
 
 ### 命令选项
+
+这里不再转录完整的帮助文本，因为它会随版本变化而过时。当前完整的选项列表请以本地程序为准：
+
+```bash
+./speederv3 --help
 ```
-UDPspeeder V3
-git version: 3e248b414c    build date: Aug  5 2018 21:59:52
-repository: https://github.com/wangyu-/UDPspeeder
 
-usage:
-    run as client: ./this_program -c -l local_listen_ip:local_port -r server_ip:server_port  [options]
-    run as server: ./this_program -s -l server_listen_ip:server_port -r remote_ip:remote_port  [options]
+几点不会变的核心约定：
 
-common options, must be same on both sides:
-    -k,--key              <32 hex>        正好32个ASCII十六进制字符，两端必须一致；用于认证，不加密
-main options:
-    -f,--fec              x:y             forward error correction, send y redundant packets for every x packets
-    --timeout             <number>        how long could a packet be held in queue before doing fec, unit: ms, default: 8ms
-    --report              <number>        turn on send/recv report, and set a period for reporting, unit: s
-advanced options:
-    --mode                <number>        fec-mode,available values: 0,1; mode 0(default) costs less bandwidth,no mtu problem.
-                                          mode 1 usually introduces less latency, but you have to care about mtu.
-    --mtu                 <number>        mtu. for mode 0, the program will split packet to segment smaller than mtu value.
-                                          for mode 1, no packet will be split, the program just check if the mtu is exceed.
-                                          default value: 1250. you typically shouldnt change this value.
-    -q,--queue-len        <number>        fec queue len, only for mode 0, fec will be performed immediately after queue is full.
-                                          default value: 200. 
-    -j,--jitter           <number>        simulated jitter. randomly delay first packet for 0~<number> ms, default value: 0.
-                                          do not use if you dont know what it means.
-    -i,--interval         <number>        scatter each fec group to a interval of <number> ms, to protect burst packet loss.
-                                          default value: 0. do not use if you dont know what it means.
-    -f,--fec              x1:y1,x2:y2,..  similiar to -f/--fec above,fine-grained fec parameters,may help save bandwidth.
-                                          example: "-f 1:3,2:4,10:6,20:10". check repo for details
-    --random-drop         <number>        simulate packet loss, unit: 0.01%. default value: 0.
-    --disable-obscure     <number>        disable obscure, to save a bit bandwidth and cpu.
-developer options:
-    --fifo                <string>        use a fifo(named pipe) for sending commands to the running program, so that you
-                                          can change fec encode parameters dynamically, check readme.md in repository for
-                                          supported commands.
-    -j ,--jitter          jmin:jmax       similiar to -j above, but create jitter randomly between jmin and jmax
-    -i,--interval         imin:imax       similiar to -i above, but scatter randomly between imin and imax
-    --decode-buf          <number>        size of buffer of fec decoder,u nit: packet, default: 2000
-    --fix-latency         <number>        try to stabilize latency, only for mode 0
-    --delay-capacity      <number>        max number of delayed packets
-    --disable-fec         <number>        completely disable fec, turn the program into a normal udp tunnel
-    --sock-buf            <number>        buf size for socket, >=10 and <=10240, unit: kbyte, default: 1024
-log and help options:
-    --log-level           <number>        0: never    1: fatal   2: error   3: warn 
-                                          4: info (default)      5: debug   6: trace
-    --log-position                        enable file name, function name, line number in log
-    --disable-color                       disable log color
-    -h,--help                             print this help message
+- `-k`/`--key` 是正好 32 个 ASCII 十六进制字符（16 字节），两端必须一致。
+- 默认模式只做认证和混淆，**不加密**；只有两端都显式加上 `--cipher xchacha20-ietf-poly1305` 才会启用真正的加密。
+- `--cipher` 和 `--pad` 必须两端一致，否则对端会被拒绝。
 
-```
 ### 包发送选项，两端设置可以不同。 只影响本地包发送。
 ##### `-f` 选项
 设置fec参数，影响数据的冗余度。

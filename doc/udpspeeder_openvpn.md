@@ -6,13 +6,13 @@
 
 #### run at server side
 ```
-./speederv2 -s -l0.0.0.0:8855 -r 127.0.0.1:7777 -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -s -l0.0.0.0:8855 -r 127.0.0.1:7777 -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 #### run at client side
 assume server ip is 45.66.77.88
 ```
-./speederv2 -c -l0.0.0.0:3333 -r 45.66.77.88:8855 -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -c -l0.0.0.0:3333 -r 45.66.77.88:8855 -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 `-k`/`--key` must be **exactly 32 ASCII hex characters** and **identical on both
@@ -29,11 +29,11 @@ line, and the same `--pad` value if you use padding:
 
 ```
 # server
-./speederv2 -s -l0.0.0.0:8855 -r 127.0.0.1:7777 -f20:10 \
+./speederv3 -s -l0.0.0.0:8855 -r 127.0.0.1:7777 -f20:10 \
     -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 
 # client
-./speederv2 -c -l0.0.0.0:3333 -r 45.66.77.88:8855 -f20:10 \
+./speederv3 -c -l0.0.0.0:3333 -r 45.66.77.88:8855 -f20:10 \
     -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 ```
 

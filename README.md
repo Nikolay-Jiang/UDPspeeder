@@ -59,9 +59,9 @@ Download binary release from https://github.com/wangyu-/UDPspeeder/releases
 Requires g++ with C++11 support.
 
 ```bash
-make          # native Linux build, produces ./speederv2
+make          # native Linux static build with -O2, produces ./speederv3
 make debug    # debug build with MY_DEBUG defined, no -O2
-make fast     # optimized build with debug symbols
+make fast     # debug-symbol build; OPT is empty, so no -O2 (not optimized)
 ```
 
 Static cross-compile targets using the bundled OpenWRT x86 musl toolchains (toolchain paths must be set in `makefile`):
@@ -76,10 +76,10 @@ Assume your server ip is 44.55.66.77, you have a service listening on udp port 7
 
 ```bash
 # Run at server side:
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777  -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777  -f20:10 -k 00112233445566778899aabbccddeeff
 
 # Run at client side
-./speederv2 -c -l0.0.0.0:3333  -r44.55.66.77:4096 -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -c -l0.0.0.0:3333  -r44.55.66.77:4096 -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 Now connecting to UDP port 3333 at the client side is equivalent to connecting to port 7777 at the server side, and the connection has been boosted by UDPspeeder.
@@ -130,15 +130,18 @@ and the test plane is unchanged.
 Every example uses a throwaway 32-hex key; replace it with your own. `-k` accepts
 exactly 32 ASCII hex characters and nothing else.
 
+A fuller, copy-pasteable set covering IPv6, port-range mode and test mode
+lives in [`docs/examples-v3.md`](docs/examples-v3.md).
+
 ### Default mode (obfuscation + SipHash authentication, no encryption)
 
 ```bash
 # server
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff
 
 # client
-./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+./speederv3 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
     -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
@@ -148,11 +151,11 @@ Both commands must carry the exact same `--cipher` value:
 
 ```bash
 # server
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 
 # client
-./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
+./speederv3 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 \
     -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 ```
 
@@ -162,18 +165,18 @@ Both commands must carry the exact same `--cipher` value:
 
 ```bash
 # server
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 -f20:10 \
     -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
 
 # client
-./speederv2 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 -f20:10 \
+./speederv3 -c -l0.0.0.0:3333 -r 44.55.66.77:4096 -f20:10 \
     -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305 --pad 32
 ```
 
 `--pad 32` without `--cipher` is a fatal startup error:
 
 ```bash
-./speederv2 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
+./speederv3 -s -l0.0.0.0:4096 -r 127.0.0.1:7777 \
     -k 00112233445566778899aabbccddeeff --pad 32
 # fatal: --pad 32 requires --cipher: a non-zero pad bucket is only meaningful in cipher mode
 ```
@@ -186,12 +189,12 @@ opens or closes sockets. The two ends may use different rotation values.
 
 ```bash
 # server: control port 14096, data ports 15000-15015
-./speederv2 -s --port-range-mode --control-port 14096 \
+./speederv3 -s --port-range-mode --control-port 14096 \
     --data-port-range 15000-15015 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff --cipher xchacha20-ietf-poly1305
 
 # client: rotate the send base every 30 seconds
-./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+./speederv3 -c --port-range-mode --control-host 44.55.66.77:14096 \
     -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
     --cipher xchacha20-ietf-poly1305 --pad 32 --port-rotate-sec 30
 ```
@@ -204,12 +207,12 @@ own, so the client never installs a port list. Here the server runs the default
 
 ```bash
 # server: default mode, no --cipher
-./speederv2 -s --port-range-mode --control-port 14096 \
+./speederv3 -s --port-range-mode --control-port 14096 \
     --data-port-range 15000-15015 -r 127.0.0.1:7777 \
     -f20:10 -k 00112233445566778899aabbccddeeff
 
 # client: requests AEAD encryption -> handshake refused
-./speederv2 -c --port-range-mode --control-host 44.55.66.77:14096 \
+./speederv3 -c --port-range-mode --control-host 44.55.66.77:14096 \
     -l 0.0.0.0:3333 -f20:10 -k 00112233445566778899aabbccddeeff \
     --cipher xchacha20-ietf-poly1305
 ```
@@ -233,10 +236,10 @@ brackets, the same way you would in a URL:
 
 ```bash
 # server
-./speederv2 -s -l"[::]:4096" -r "[::1]:7777" -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -s -l"[::]:4096" -r "[::1]:7777" -f20:10 -k 00112233445566778899aabbccddeeff
 
 # client
-./speederv2 -c -l"[::1]:3333" -r "[2001:db8::1]:4096" -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -c -l"[::1]:3333" -r "[2001:db8::1]:4096" -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 Each socket takes its family from the argument that describes it, and the
@@ -248,10 +251,10 @@ path, with no second instance and no gateway in between:
 
 ```bash
 # server: v6 tunnel in, v4 application out
-./speederv2 -s -l"[::1]:4096" -r "127.0.0.1:7777" -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -s -l"[::1]:4096" -r "127.0.0.1:7777" -f20:10 -k 00112233445566778899aabbccddeeff
 
 # client: v4 application in, v6 tunnel out
-./speederv2 -c -l"127.0.0.1:3333" -r "[::1]:4096" -f20:10 -k 00112233445566778899aabbccddeeff
+./speederv3 -c -l"127.0.0.1:3333" -r "[::1]:4096" -f20:10 -k 00112233445566778899aabbccddeeff
 ```
 
 The one pair that is **not** independent is the tunnel-facing pair — a
@@ -341,7 +344,7 @@ Enable port-range mode with 16 data ports:
 
 ```bash
 # Server: listen on control port 14096 and data ports 15000–15015
-./speederv2 -s \
+./speederv3 -s \
     --port-range-mode \
     --control-port 14096 \
     --data-port-range 15000-15015 \
@@ -349,7 +352,7 @@ Enable port-range mode with 16 data ports:
     -f20:10 -k 00112233445566778899aabbccddeeff
 
 # Client: dial control port 14096, get data port list, tunnel via those ports
-./speederv2 -c \
+./speederv3 -c \
     --port-range-mode \
     --control-host 44.55.66.77:14096 \
     -l 0.0.0.0:3333 \
@@ -414,10 +417,10 @@ inbound port.
 
 ```bash
 # responder (far end)
-./speederv2 -s --test-mode -l0.0.0.0:4096 -k 00112233445566778899aabbccddeeff
+./speederv3 -s --test-mode -l0.0.0.0:4096 -k 00112233445566778899aabbccddeeff
 
 # prober (drives the test, prints the report)
-./speederv2 -c --test-mode -r<server_ip>:4096 -k 00112233445566778899aabbccddeeff \
+./speederv3 -c --test-mode -r<server_ip>:4096 -k 00112233445566778899aabbccddeeff \
     --test-duration 30 --test-pps 200 --test-pkt-size 1200 --test-app-mbps 5
 ```
 
@@ -537,62 +540,11 @@ touching the network.
 
 ### Full Options
 
-> **This transcript is out of date.** It was captured in 2018 and does not list
-> several options added since, including `--out-addr`, port-range mode, test
-> mode and the IPv6 guidance above. Run `./speederv2 --help` for the current,
-> authoritative list.
+Run `./speederv3 --help` for the complete, always-current option list. The
+option tables above cover the V3-specific flags (`--cipher`, `--pad`,
+`--port-rotate-sec`, port-range mode and test mode); the help output also lists
+the FEC, delay and logging options carried over from earlier versions.
 
-```
-UDPspeeder V3
-git version: 3e248b414c    build date: Aug  5 2018 21:59:52
-repository: https://github.com/wangyu-/UDPspeeder
-
-usage:
-    run as client: ./this_program -c -l local_listen_ip:local_port -r server_ip:server_port  [options]
-    run as server: ./this_program -s -l server_listen_ip:server_port -r remote_ip:remote_port  [options]
-
-common options, must be same on both sides:
-    -k,--key              <32 hex>        exactly 32 ascii hex chars, required on both sides; authenticates, never encrypts
-main options:
-    -f,--fec              x:y             forward error correction, send y redundant packets for every x packets
-    --timeout             <number>        how long could a packet be held in queue before doing fec, unit: ms, default: 8ms
-    --report              <number>        turn on send/recv report, and set a period for reporting, unit: s
-advanced options:
-    --mode                <number>        fec-mode,available values: 0,1; mode 0(default) costs less bandwidth,no mtu problem.
-                                          mode 1 usually introduces less latency, but you have to care about mtu.
-    --mtu                 <number>        mtu. for mode 0, the program will split packet to segment smaller than mtu value.
-                                          for mode 1, no packet will be split, the program just check if the mtu is exceed.
-                                          default value: 1250. you typically shouldnt change this value.
-    -q,--queue-len        <number>        fec queue len, only for mode 0, fec will be performed immediately after queue is full.
-                                          default value: 200. 
-    -j,--jitter           <number>        simulated jitter. randomly delay first packet for 0~<number> ms, default value: 0.
-                                          do not use if you dont know what it means.
-    -i,--interval         <number>        scatter each fec group to a interval of <number> ms, to protect burst packet loss.
-                                          default value: 0. do not use if you dont know what it means.
-    -f,--fec              x1:y1,x2:y2,..  similiar to -f/--fec above,fine-grained fec parameters,may help save bandwidth.
-                                          example: "-f 1:3,2:4,10:6,20:10". check repo for details
-    --random-drop         <number>        simulate packet loss, unit: 0.01%. default value: 0.
-    --disable-obscure     <number>        disable obscure, to save a bit bandwidth and cpu.
-developer options:
-    --fifo                <string>        use a fifo(named pipe) for sending commands to the running program, so that you
-                                          can change fec encode parameters dynamically, check readme.md in repository for
-                                          supported commands.
-    -j ,--jitter          jmin:jmax       similiar to -j above, but create jitter randomly between jmin and jmax
-    -i,--interval         imin:imax       similiar to -i above, but scatter randomly between imin and imax
-    --decode-buf          <number>        size of buffer of fec decoder,u nit: packet, default: 2000
-    --fix-latency         <number>        try to stabilize latency, only for mode 0
-    --delay-capacity      <number>        max number of delayed packets
-    --disable-fec         <number>        completely disable fec, turn the program into a normal udp tunnel
-    --sock-buf            <number>        buf size for socket, >=10 and <=10240, unit: kbyte, default: 1024
-    --io-batch            <number>        batch size for recvmmsg/sendmmsg, 1..64, default: 32. set to 1 to disable batching.
-log and help options:
-    --log-level           <number>        0: never    1: fatal   2: error   3: warn 
-                                          4: info (default)      5: debug   6: trace
-    --log-position                        enable file name, function name, line number in log
-    --disable-color                       disable log color
-    -h,--help                             print this help message
-
-```
 #### `--fifo` option
 Use a fifo(named pipe) for sending commands to the running program. For example `--fifo fifo.file`, you can use following commands to change parameters dynamically:
 ```
@@ -603,17 +555,6 @@ echo queue-len 100 > fifo.file
 echo mode 0 > fifo.file
 ```
 
-
-# Recent Changes (branch_libev)
-
-Recent performance and maintenance work on `branch_libev`:
-
-- **Linux x86/x86_64 only.** Windows, macOS, ARM and MIPS build paths were removed; the tree now targets Linux x86 / x86_64 only, simplifying the source and the makefile.
-- **Zero-malloc hot path in `delay_manager`.** Per-packet `malloc`/`free` on the outbound delay/jitter path was replaced with a pre-allocated object pool (`packet_pool_t`, LIFO free list, ~800 slots). Falls back to `malloc` with a warning only if the pool is exhausted.
-- **Batch I/O via `recvmmsg` / `sendmmsg`.** Both the client remote callback and the server local-listen callback now drain up to `--io-batch` packets per libev wakeup with a single `recvmmsg` syscall. Outbound packets produced while decoding a batch are coalesced and flushed with `sendmmsg`, grouped by fd. At 32-packet batches this cuts receive/send syscall counts by roughly 32×, materially lowering CPU at high pps. New `--io-batch N` CLI option (1..64, default 32; set to 1 to disable).
-- **CI + loopback smoke test.** A GitHub Actions workflow (`.github/workflows/ci.yml`) now builds on `ubuntu-latest` and runs `tests/smoke.sh`, which spins up a server, client, and a small Python UDP echo, and verifies FEC recovery under both lossless and `--random-drop 1500` (15% loss) conditions using `-f20:10`.
-
-All of the above is on `branch_libev`; no CLI compatibility was broken (every new flag is additive with sensible defaults).
 
 # wiki
 Check wiki for more info:
